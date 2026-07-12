@@ -72,10 +72,10 @@ type receivedPacketData struct {
 	packetBytes uint32
 }
 
+// fragmentReassemblyData tracks a packet being reassembled from fragments.
+// (The C struct also carries sequence, ack and ack_bits fields, but they are
+// never read in either implementation, so the port drops them.)
 type fragmentReassemblyData struct {
-	sequence             uint16
-	ack                  uint16
-	ackBits              uint32
 	numFragmentsReceived int
 	numFragmentsTotal    int
 	packetData           []byte
@@ -484,9 +484,6 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 
 			packetBufferSize := MaxPacketHeaderBytes + numFragments*endpoint.config.FragmentSize
 
-			reassemblyData.sequence = sequence
-			reassemblyData.ack = 0
-			reassemblyData.ackBits = 0
 			reassemblyData.numFragmentsReceived = 0
 			reassemblyData.numFragmentsTotal = numFragments
 			reassemblyData.packetData = make([]byte, packetBufferSize)

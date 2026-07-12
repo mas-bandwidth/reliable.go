@@ -147,6 +147,12 @@ func TestPacketHeader(t *testing.T) {
 
 	checkHeader(10000, 100, 0, MaxPacketHeaderBytes)
 
+	// boundary: sequence difference of exactly 255 encodes the ack as a one
+	// byte offset, 256 as a full two byte ack
+
+	checkHeader(355, 100, 0, 1+2+1+4)
+	checkHeader(356, 100, 0, 1+2+2+4)
+
 	// rare case. sequence and ack are far apart, significant # of acks are missing
 
 	checkHeader(10000, 100, 0xFEFEFFFE, 1+2+2+3)
@@ -172,8 +178,6 @@ func newTestContext() *testContext {
 }
 
 func (ctx *testContext) transmitPacket(id uint64, sequence uint16, packetData []byte) {
-	_ = sequence
-
 	if ctx.drop {
 		return
 	}

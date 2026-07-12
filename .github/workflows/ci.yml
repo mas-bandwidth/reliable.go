@@ -33,6 +33,18 @@ jobs:
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
+  # every test job already verifies the Go port against the committed golden
+  # transcript (TestWireCompatibility). this job closes the loop by rebuilding
+  # the golden from the pinned C sources, so the golden itself cannot drift.
+  wire-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Regenerate golden transcript from the C library
+        run: ./interop/regenerate.sh /tmp/regenerated.gz
+      - name: Verify committed golden matches the C library
+        run: cmp <(gunzip -c /tmp/regenerated.gz) <(gunzip -c testdata/c_transcript.txt.gz)
+
   test:
     strategy:
       matrix:

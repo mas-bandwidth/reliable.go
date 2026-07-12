@@ -50,7 +50,7 @@ For example, in a client/server setup you would have one endpoint on each client
 Next, create a function to transmit packets:
 
 ```go
-func transmitPacket(context any, id uint64, sequence uint16, packetData []byte) {
+func transmitPacket(id uint64, sequence uint16, packetData []byte) {
     // send packet using your own udp socket
 }
 ```
@@ -58,11 +58,13 @@ func transmitPacket(context any, id uint64, sequence uint16, packetData []byte) 
 And a function to process received packets:
 
 ```go
-func processPacket(context any, id uint64, sequence uint16, packetData []byte) bool {
+func processPacket(id uint64, sequence uint16, packetData []byte) bool {
     // read the packet here and process its contents, return false if the packet should not be acked
     return true
 }
 ```
+
+To pass state to the callbacks, use a closure or a method value. The id is the `Config.ID` of the endpoint that fired the callback, so callbacks shared between endpoints can tell them apart — for example, one transmit function bound to one socket serving every client slot on a server.
 
 For each packet you receive from your udp socket, call this on the endpoint that should receive it:
 
@@ -129,9 +131,12 @@ The port keeps the structure, behavior and wire format of the C library, with th
 
 1. `reliable_endpoint_create` is `reliable.NewEndpoint` and returns an error for invalid configs instead of asserting.
 2. There are no custom allocator hooks — the Go garbage collector manages memory, and `reliable_endpoint_free_packet`/`reliable_endpoint_destroy` have no equivalent.
-3. `ReceivePacket` treats an empty packet as invalid instead of asserting, since network input is untrusted. `SendPacket` panics on an empty packet, which is a programmer error.
-4. `reliable_init`/`reliable_term` are gone — there is no library state to initialize.
-5. Stats are float64 instead of float.
+3. The `void * context` parameter on the callbacks is gone — closures and method values are how state reaches callbacks in Go. The endpoint id remains.
+4. `ReceivePacket` treats an empty packet as invalid instead of asserting, since network input is untrusted. `SendPacket` panics on an empty packet, which is a programmer error.
+5. `reliable_init`/`reliable_term` are gone — there is no library state to initialize.
+6. Stats are float64 instead of float.
+
+Sending and receiving packets does not allocate (fragment reassembly allocates one buffer per fragmented packet, just like the C library). Run `go test -bench .` to check on your hardware.
 
 # Author
 

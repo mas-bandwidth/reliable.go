@@ -5,23 +5,23 @@ import (
 	"math"
 )
 
-// TransmitPacketFunction is called to send a packet: (context, id, sequence,
+// TransmitPacketFunction is called to send a packet: (id, sequence,
 // packetData). The packet data is only valid for the duration of the call, so
 // copy it if you need to keep it. It must not send packets on the same
-// endpoint.
-type TransmitPacketFunction func(context any, id uint64, sequence uint16, packetData []byte)
+// endpoint. To pass state to the callback, use a closure or a method value.
+type TransmitPacketFunction func(id uint64, sequence uint16, packetData []byte)
 
-// ProcessPacketFunction is called when a packet is received: (context, id,
-// sequence, packetData). Return true to accept and ack the packet, false to
-// reject it (rejected packets are not acked and may be processed again if they
-// arrive again). The packet data is only valid for the duration of the call,
-// so copy it if you need to keep it.
-type ProcessPacketFunction func(context any, id uint64, sequence uint16, packetData []byte) bool
+// ProcessPacketFunction is called when a packet is received: (id, sequence,
+// packetData). Return true to accept and ack the packet, false to reject it
+// (rejected packets are not acked and may be processed again if they arrive
+// again). The packet data is only valid for the duration of the call, so copy
+// it if you need to keep it. To pass state to the callback, use a closure or
+// a method value.
+type ProcessPacketFunction func(id uint64, sequence uint16, packetData []byte) bool
 
 // Config configures an Endpoint.
 type Config struct {
 	Name                         string                 // name of the endpoint. used in log output
-	Context                      any                    // passed to the transmit and process packet callbacks
 	ID                           uint64                 // id of the endpoint. passed to callbacks so shared callbacks can tell endpoints apart
 	MaxPacketSize                int                    // maximum packet size that can be sent or received (bytes)
 	FragmentAbove                int                    // packets larger than this many bytes are sent as fragments
@@ -120,40 +120,40 @@ type Endpoint struct {
 // NewEndpoint creates an endpoint. The time is your current time in seconds.
 func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config == nil {
-		return nil, errors.New("config must not be nil")
+		return nil, errors.New("reliable: config must not be nil")
 	}
 	if config.MaxPacketSize <= 0 {
-		return nil, errors.New("max packet size must be positive")
+		return nil, errors.New("reliable: max packet size must be positive")
 	}
 	if config.FragmentAbove <= 0 {
-		return nil, errors.New("fragment above must be positive")
+		return nil, errors.New("reliable: fragment above must be positive")
 	}
 	if config.MaxFragments <= 0 || config.MaxFragments > 256 {
-		return nil, errors.New("max fragments must be in [1,256]")
+		return nil, errors.New("reliable: max fragments must be in [1,256]")
 	}
 	if config.FragmentSize <= 0 {
-		return nil, errors.New("fragment size must be positive")
+		return nil, errors.New("reliable: fragment size must be positive")
 	}
 	if config.AckBufferSize <= 0 {
-		return nil, errors.New("ack buffer size must be positive")
+		return nil, errors.New("reliable: ack buffer size must be positive")
 	}
 	if config.SentPacketsBufferSize <= 0 {
-		return nil, errors.New("sent packets buffer size must be positive")
+		return nil, errors.New("reliable: sent packets buffer size must be positive")
 	}
 	if config.ReceivedPacketsBufferSize <= 0 {
-		return nil, errors.New("received packets buffer size must be positive")
+		return nil, errors.New("reliable: received packets buffer size must be positive")
 	}
 	if config.FragmentReassemblyBufferSize <= 0 {
-		return nil, errors.New("fragment reassembly buffer size must be positive")
+		return nil, errors.New("reliable: fragment reassembly buffer size must be positive")
 	}
 	if config.RTTHistorySize <= 0 {
-		return nil, errors.New("rtt history size must be positive")
+		return nil, errors.New("reliable: rtt history size must be positive")
 	}
 	if config.TransmitPacketFunction == nil {
-		return nil, errors.New("transmit packet function must not be nil")
+		return nil, errors.New("reliable: transmit packet function must not be nil")
 	}
 	if config.ProcessPacketFunction == nil {
-		return nil, errors.New("process packet function must not be nil")
+		return nil, errors.New("reliable: process packet function must not be nil")
 	}
 
 	endpoint := &Endpoint{
@@ -213,7 +213,9 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 
 	ack, ackBits := endpoint.receivedPackets.generateAckBits()
 
-	logPrintf(LogLevelDebug, "[%s] sending packet %d\n", endpoint.config.Name, sequence)
+	if debugLogging() {
+		logPrintf(LogLevelDebug, "[%s] sending packet %d\n", endpoint.config.Name, sequence)
+	}
 
 	sentPacket := endpoint.sentPackets.insert(sequence)
 
@@ -224,7 +226,9 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 	if packetBytes <= endpoint.config.FragmentAbove {
 		// regular packet
 
-		logPrintf(LogLevelDebug, "[%s] sending packet %d without fragmentation\n", endpoint.config.Name, sequence)
+		if debugLogging() {
+			logPrintf(LogLevelDebug, "[%s] sending packet %d without fragmentation\n", endpoint.config.Name, sequence)
+		}
 
 		transmitPacketData := endpoint.transmitBuffer
 
@@ -232,7 +236,7 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 
 		copy(transmitPacketData[packetHeaderBytes:], packetData)
 
-		endpoint.config.TransmitPacketFunction(endpoint.config.Context, endpoint.config.ID, sequence, transmitPacketData[:packetHeaderBytes+packetBytes])
+		endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, transmitPacketData[:packetHeaderBytes+packetBytes])
 	} else {
 		// fragmented packet
 
@@ -245,14 +249,16 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 			numFragments++
 		}
 
-		logPrintf(LogLevelDebug, "[%s] sending packet %d as %d fragments\n", endpoint.config.Name, sequence, numFragments)
+		if debugLogging() {
+			logPrintf(LogLevelDebug, "[%s] sending packet %d as %d fragments\n", endpoint.config.Name, sequence, numFragments)
+		}
 
 		fragmentPacketData := endpoint.transmitBuffer
 
 		q := 0
 		end := packetBytes
 
-		for fragmentID := 0; fragmentID < numFragments; fragmentID++ {
+		for fragmentID := range numFragments {
 			p := 0
 
 			fragmentPacketData[p] = 1
@@ -280,7 +286,7 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 			p += bytesToCopy
 			q += bytesToCopy
 
-			endpoint.config.TransmitPacketFunction(endpoint.config.Context, endpoint.config.ID, sequence, fragmentPacketData[:p])
+			endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, fragmentPacketData[:p])
 
 			endpoint.counters[CounterNumFragmentsSent]++
 		}
@@ -316,7 +322,9 @@ func (endpoint *Endpoint) storeFragmentData(reassemblyData *fragmentReassemblyDa
 	maxSize := MaxPacketHeaderBytes + reassemblyData.numFragmentsTotal*fragmentSize
 
 	if fragmentBytes < 0 || endOffset > maxSize {
-		logPrintf(LogLevelDebug, "[reliable] invalid fragment size %d (would write past %d/%d)\n", fragmentBytes, endOffset, maxSize)
+		if debugLogging() {
+			logPrintf(LogLevelDebug, "[reliable] invalid fragment size %d (would write past %d/%d)\n", fragmentBytes, endOffset, maxSize)
+		}
 		return
 	}
 
@@ -330,14 +338,18 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 	packetBytes := len(packetData)
 
 	if packetBytes == 0 {
-		logPrintf(LogLevelDebug, "[%s] ignoring empty packet\n", endpoint.config.Name)
+		if debugLogging() {
+			logPrintf(LogLevelDebug, "[%s] ignoring empty packet\n", endpoint.config.Name)
+		}
 		endpoint.counters[CounterNumPacketsInvalid]++
 		return
 	}
 
 	if packetBytes > endpoint.config.MaxPacketSize+MaxPacketHeaderBytes+FragmentHeaderBytes {
-		logPrintf(LogLevelDebug, "[%s] packet too large to receive. packet is at least %d bytes, maximum is %d\n",
-			endpoint.config.Name, packetBytes-(MaxPacketHeaderBytes+FragmentHeaderBytes), endpoint.config.MaxPacketSize)
+		if debugLogging() {
+			logPrintf(LogLevelDebug, "[%s] packet too large to receive. packet is at least %d bytes, maximum is %d\n",
+				endpoint.config.Name, packetBytes-(MaxPacketHeaderBytes+FragmentHeaderBytes), endpoint.config.MaxPacketSize)
+		}
 		endpoint.counters[CounterNumPacketsTooLargeToReceive]++
 		return
 	}
@@ -351,7 +363,9 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 
 		sequence, ack, ackBits, packetHeaderBytes := readPacketHeader(endpoint.config.Name, packetData)
 		if packetHeaderBytes < 0 {
-			logPrintf(LogLevelDebug, "[%s] ignoring invalid packet. could not read packet header\n", endpoint.config.Name)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] ignoring invalid packet. could not read packet header\n", endpoint.config.Name)
+			}
 			endpoint.counters[CounterNumPacketsInvalid]++
 			return
 		}
@@ -366,21 +380,29 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 		}
 
 		if !endpoint.receivedPackets.testInsert(sequence) {
-			logPrintf(LogLevelDebug, "[%s] ignoring stale packet %d\n", endpoint.config.Name, sequence)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] ignoring stale packet %d\n", endpoint.config.Name, sequence)
+			}
 			endpoint.counters[CounterNumPacketsStale]++
 			return
 		}
 
 		if endpoint.receivedPackets.exists(sequence) {
-			logPrintf(LogLevelDebug, "[%s] ignoring duplicate packet %d\n", endpoint.config.Name, sequence)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] ignoring duplicate packet %d\n", endpoint.config.Name, sequence)
+			}
 			endpoint.counters[CounterNumPacketsDuplicate]++
 			return
 		}
 
-		logPrintf(LogLevelDebug, "[%s] processing packet %d\n", endpoint.config.Name, sequence)
+		if debugLogging() {
+			logPrintf(LogLevelDebug, "[%s] processing packet %d\n", endpoint.config.Name, sequence)
+		}
 
-		if endpoint.config.ProcessPacketFunction(endpoint.config.Context, endpoint.config.ID, sequence, packetData[packetHeaderBytes:]) {
-			logPrintf(LogLevelDebug, "[%s] process packet %d successful\n", endpoint.config.Name, sequence)
+		if endpoint.config.ProcessPacketFunction(endpoint.config.ID, sequence, packetData[packetHeaderBytes:]) {
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] process packet %d successful\n", endpoint.config.Name, sequence)
+			}
 
 			receivedPacket := endpoint.receivedPackets.insert(sequence)
 
@@ -389,7 +411,7 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 			receivedPacket.time = endpoint.time
 			receivedPacket.packetBytes = uint32(endpoint.config.PacketHeaderSize + packetBytes)
 
-			for i := 0; i < 32; i++ {
+			for i := range 32 {
 				if ackBits&1 != 0 {
 					ackSequence := ack - uint16(i)
 
@@ -397,7 +419,9 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 
 					if sentPacket != nil && !sentPacket.acked {
 						if len(endpoint.acks) < endpoint.config.AckBufferSize {
-							logPrintf(LogLevelDebug, "[%s] acked packet %d\n", endpoint.config.Name, ackSequence)
+							if debugLogging() {
+								logPrintf(LogLevelDebug, "[%s] acked packet %d\n", endpoint.config.Name, ackSequence)
+							}
 							endpoint.acks = append(endpoint.acks, ackSequence)
 							endpoint.counters[CounterNumPacketsAcked]++
 							sentPacket.acked = true
@@ -430,14 +454,18 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 		fragmentID, numFragments, _, sequence, ack, ackBits, fragmentHeaderBytes := readFragmentHeader(endpoint.config.Name, packetData, endpoint.config.MaxFragments, endpoint.config.FragmentSize)
 
 		if fragmentHeaderBytes < 0 {
-			logPrintf(LogLevelDebug, "[%s] ignoring invalid fragment. could not read fragment header\n", endpoint.config.Name)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] ignoring invalid fragment. could not read fragment header\n", endpoint.config.Name)
+			}
 			endpoint.counters[CounterNumFragmentsInvalid]++
 			return
 		}
 
 		if endpoint.receivedPackets.exists(sequence) {
-			logPrintf(LogLevelDebug, "[%s] ignoring fragment %d of packet %d. packet already received\n",
-				endpoint.config.Name, fragmentID, sequence)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] ignoring fragment %d of packet %d. packet already received\n",
+					endpoint.config.Name, fragmentID, sequence)
+			}
 			return
 		}
 
@@ -480,8 +508,10 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 			return
 		}
 
-		logPrintf(LogLevelDebug, "[%s] received fragment %d of packet %d (%d/%d)\n",
-			endpoint.config.Name, fragmentID, sequence, reassemblyData.numFragmentsReceived+1, numFragments)
+		if debugLogging() {
+			logPrintf(LogLevelDebug, "[%s] received fragment %d of packet %d (%d/%d)\n",
+				endpoint.config.Name, fragmentID, sequence, reassemblyData.numFragmentsReceived+1, numFragments)
+		}
 
 		reassemblyData.numFragmentsReceived++
 		reassemblyData.fragmentReceived[fragmentID] = true
@@ -489,7 +519,9 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 		endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:])
 
 		if reassemblyData.numFragmentsReceived == reassemblyData.numFragmentsTotal {
-			logPrintf(LogLevelDebug, "[%s] completed reassembly of packet %d\n", endpoint.config.Name, sequence)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] completed reassembly of packet %d\n", endpoint.config.Name, sequence)
+			}
 
 			start := MaxPacketHeaderBytes - reassemblyData.packetHeaderBytes
 			finish := MaxPacketHeaderBytes + reassemblyData.packetBytes
@@ -524,7 +556,7 @@ func (endpoint *Endpoint) Reset() {
 
 	endpoint.counters = [NumCounters]uint64{}
 
-	for i := 0; i < endpoint.config.FragmentReassemblyBufferSize; i++ {
+	for i := range endpoint.config.FragmentReassemblyBufferSize {
 		reassemblyData := endpoint.fragmentReassembly.atIndex(i)
 
 		if reassemblyData != nil && reassemblyData.packetData != nil {
@@ -548,8 +580,7 @@ func (endpoint *Endpoint) Update(time float64) {
 		maxRTT := 0.0
 		sumRTT := 0.0
 		count := 0
-		for i := 0; i < endpoint.config.RTTHistorySize; i++ {
-			rtt := endpoint.rttHistoryBuffer[i]
+		for _, rtt := range endpoint.rttHistoryBuffer {
 			if rtt >= 0.0 {
 				if rtt < minRTT {
 					minRTT = rtt
@@ -577,9 +608,9 @@ func (endpoint *Endpoint) Update(time float64) {
 	{
 		sum := 0.0
 		count := 0
-		for i := 0; i < endpoint.config.RTTHistorySize; i++ {
-			if endpoint.rttHistoryBuffer[i] >= 0.0 {
-				sum += endpoint.rttHistoryBuffer[i] - endpoint.rttMin
+		for _, rtt := range endpoint.rttHistoryBuffer {
+			if rtt >= 0.0 {
+				sum += rtt - endpoint.rttMin
 				count++
 			}
 		}
@@ -592,25 +623,25 @@ func (endpoint *Endpoint) Update(time float64) {
 
 	// calculate max jitter vs. min rtt
 	{
-		max := 0.0
-		for i := 0; i < endpoint.config.RTTHistorySize; i++ {
-			if endpoint.rttHistoryBuffer[i] >= 0.0 {
-				difference := endpoint.rttHistoryBuffer[i] - endpoint.rttMin
-				if difference > max {
-					max = difference
+		maxJitter := 0.0
+		for _, rtt := range endpoint.rttHistoryBuffer {
+			if rtt >= 0.0 {
+				difference := rtt - endpoint.rttMin
+				if difference > maxJitter {
+					maxJitter = difference
 				}
 			}
 		}
-		endpoint.jitterMaxVsMinRTT = max
+		endpoint.jitterMaxVsMinRTT = maxJitter
 	}
 
 	// calculate stddev jitter vs. avg rtt
 	{
 		sum := 0.0
 		count := 0
-		for i := 0; i < endpoint.config.RTTHistorySize; i++ {
-			if endpoint.rttHistoryBuffer[i] >= 0.0 {
-				deviation := endpoint.rttHistoryBuffer[i] - endpoint.rttAvg
+		for _, rtt := range endpoint.rttHistoryBuffer {
+			if rtt >= 0.0 {
+				deviation := rtt - endpoint.rttAvg
 				sum += deviation * deviation
 				count++
 			}
@@ -628,7 +659,7 @@ func (endpoint *Endpoint) Update(time float64) {
 		numSent := 0
 		numDropped := 0
 		numSamples := endpoint.config.SentPacketsBufferSize / 2
-		for i := 0; i < numSamples; i++ {
+		for i := range numSamples {
 			sequence := baseSequence + uint16(i)
 			sentPacket := endpoint.sentPackets.find(sequence)
 			if sentPacket != nil {
@@ -657,7 +688,7 @@ func (endpoint *Endpoint) Update(time float64) {
 		startTime := math.MaxFloat64
 		finishTime := 0.0
 		numSamples := endpoint.config.SentPacketsBufferSize / 2
-		for i := 0; i < numSamples; i++ {
+		for i := range numSamples {
 			sequence := baseSequence + uint16(i)
 			sentPacket := endpoint.sentPackets.find(sequence)
 			if sentPacket == nil {
@@ -688,7 +719,7 @@ func (endpoint *Endpoint) Update(time float64) {
 		startTime := math.MaxFloat64
 		finishTime := 0.0
 		numSamples := endpoint.config.ReceivedPacketsBufferSize / 2
-		for i := 0; i < numSamples; i++ {
+		for i := range numSamples {
 			sequence := baseSequence + uint16(i)
 			receivedPacket := endpoint.receivedPackets.find(sequence)
 			if receivedPacket == nil {
@@ -719,7 +750,7 @@ func (endpoint *Endpoint) Update(time float64) {
 		startTime := math.MaxFloat64
 		finishTime := 0.0
 		numSamples := endpoint.config.SentPacketsBufferSize / 2
-		for i := 0; i < numSamples; i++ {
+		for i := range numSamples {
 			sequence := baseSequence + uint16(i)
 			sentPacket := endpoint.sentPackets.find(sequence)
 			if sentPacket == nil || !sentPacket.acked {

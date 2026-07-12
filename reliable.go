@@ -98,6 +98,13 @@ func logPrintf(level LogLevel, format string, args ...any) {
 	printfFunction(format, args...)
 }
 
+// debugLogging reports whether debug log output is enabled. Hot paths check
+// this before calling logPrintf so that building the argument list costs
+// nothing when logging is off.
+func debugLogging() bool {
+	return logLevel.Load() >= int32(LogLevelDebug)
+}
+
 // sequenceGreaterThan compares 16 bit sequence numbers, handling wrap around.
 func sequenceGreaterThan(s1, s2 uint16) bool {
 	return ((s1 > s2) && (s1-s2 <= 32768)) ||

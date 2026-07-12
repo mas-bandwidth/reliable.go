@@ -27,8 +27,7 @@ var globalTime = 100.0
 
 var globalContext testContext
 
-func transmitPacket(context any, id uint64, sequence uint16, packetData []byte) {
-	ctx := context.(*testContext)
+func (ctx *testContext) transmitPacket(id uint64, sequence uint16, packetData []byte) {
 
 	if rand.Intn(101) < 5 {
 		return
@@ -66,7 +65,7 @@ func checkPacketData(packetData []byte) {
 	}
 }
 
-func processPacket(context any, id uint64, sequence uint16, packetData []byte) bool {
+func processPacket(id uint64, sequence uint16, packetData []byte) bool {
 	checkPacketData(packetData)
 	return true
 }
@@ -85,15 +84,13 @@ func soakInitialize(quiet bool) {
 	serverConfig.FragmentAbove = 500
 
 	clientConfig.Name = "client"
-	clientConfig.Context = &globalContext
 	clientConfig.ID = 0
-	clientConfig.TransmitPacketFunction = transmitPacket
+	clientConfig.TransmitPacketFunction = globalContext.transmitPacket
 	clientConfig.ProcessPacketFunction = processPacket
 
 	serverConfig.Name = "server"
-	serverConfig.Context = &globalContext
 	serverConfig.ID = 1
-	serverConfig.TransmitPacketFunction = transmitPacket
+	serverConfig.TransmitPacketFunction = globalContext.transmitPacket
 	serverConfig.ProcessPacketFunction = processPacket
 
 	var err error

@@ -171,10 +171,8 @@ func newTestContext() *testContext {
 	return &testContext{allowPackets: -1}
 }
 
-func testTransmitPacketFunction(context any, id uint64, sequence uint16, packetData []byte) {
+func (ctx *testContext) transmitPacket(id uint64, sequence uint16, packetData []byte) {
 	_ = sequence
-
-	ctx := context.(*testContext)
 
 	if ctx.drop {
 		return
@@ -194,7 +192,7 @@ func testTransmitPacketFunction(context any, id uint64, sequence uint16, packetD
 	}
 }
 
-func testProcessPacketFunction(context any, id uint64, sequence uint16, packetData []byte) bool {
+func testProcessPacketFunction(id uint64, sequence uint16, packetData []byte) bool {
 	return true
 }
 
@@ -207,15 +205,13 @@ func newTestEndpointPair(t *testing.T, context *testContext, time float64, modif
 	receiverConfig := DefaultConfig()
 
 	senderConfig.Name = "sender"
-	senderConfig.Context = context
 	senderConfig.ID = 0
-	senderConfig.TransmitPacketFunction = testTransmitPacketFunction
+	senderConfig.TransmitPacketFunction = context.transmitPacket
 	senderConfig.ProcessPacketFunction = testProcessPacketFunction
 
 	receiverConfig.Name = "receiver"
-	receiverConfig.Context = context
 	receiverConfig.ID = 1
-	receiverConfig.TransmitPacketFunction = testTransmitPacketFunction
+	receiverConfig.TransmitPacketFunction = context.transmitPacket
 	receiverConfig.ProcessPacketFunction = testProcessPacketFunction
 
 	if modifyConfig != nil {
@@ -349,7 +345,7 @@ func TestDuplicatePackets(t *testing.T) {
 
 	// deliver each packet to the receiver twice, simulating duplication on the network
 
-	duplicateTransmit := func(ctx any, id uint64, sequence uint16, packetData []byte) {
+	duplicateTransmit := func(id uint64, sequence uint16, packetData []byte) {
 		if id == 0 {
 			context.receiver.ReceivePacket(packetData)
 			context.receiver.ReceivePacket(packetData)
@@ -357,16 +353,14 @@ func TestDuplicatePackets(t *testing.T) {
 	}
 
 	senderConfig.Name = "sender"
-	senderConfig.Context = context
 	senderConfig.ID = 0
 	senderConfig.TransmitPacketFunction = duplicateTransmit
 	senderConfig.ProcessPacketFunction = testProcessPacketFunction
 
 	receiverConfig.Name = "receiver"
-	receiverConfig.Context = context
 	receiverConfig.ID = 1
 	receiverConfig.TransmitPacketFunction = duplicateTransmit
-	receiverConfig.ProcessPacketFunction = func(ctx any, id uint64, sequence uint16, packetData []byte) bool {
+	receiverConfig.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
 		numProcessed++
 		return true
 	}
@@ -427,7 +421,7 @@ func TestStalePackets(t *testing.T) {
 	senderConfig := DefaultConfig()
 	receiverConfig := DefaultConfig()
 
-	transmit := func(ctx any, id uint64, sequence uint16, packetData []byte) {
+	transmit := func(id uint64, sequence uint16, packetData []byte) {
 		if id == 0 {
 			if sequence == 0 && firstPacket == nil {
 				firstPacket = append([]byte(nil), packetData...)
@@ -437,16 +431,14 @@ func TestStalePackets(t *testing.T) {
 	}
 
 	senderConfig.Name = "sender"
-	senderConfig.Context = context
 	senderConfig.ID = 0
 	senderConfig.TransmitPacketFunction = transmit
 	senderConfig.ProcessPacketFunction = testProcessPacketFunction
 
 	receiverConfig.Name = "receiver"
-	receiverConfig.Context = context
 	receiverConfig.ID = 1
 	receiverConfig.TransmitPacketFunction = transmit
-	receiverConfig.ProcessPacketFunction = func(ctx any, id uint64, sequence uint16, packetData []byte) bool {
+	receiverConfig.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
 		numProcessed++
 		return true
 	}
@@ -581,7 +573,7 @@ func TestPackets(t *testing.T) {
 
 	context := newTestContext()
 
-	processPacketValidate := func(ctx any, id uint64, sequence uint16, packetData []byte) bool {
+	processPacketValidate := func(id uint64, sequence uint16, packetData []byte) bool {
 		validatePacketData(t, packetData)
 		return true
 	}
@@ -635,7 +627,7 @@ func TestLargePackets(t *testing.T) {
 
 	context := newTestContext()
 
-	processPacketValidateLarge := func(ctx any, id uint64, sequence uint16, packetData []byte) bool {
+	processPacketValidateLarge := func(id uint64, sequence uint16, packetData []byte) bool {
 		packetBytes := len(packetData)
 		dataBytes := int(packetData[0]) | int(packetData[1])<<8
 		if packetBytes != dataBytes+2 {

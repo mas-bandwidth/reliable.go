@@ -51,7 +51,7 @@ func (b *sequenceBuffer[T]) removeEntries(startSequence, finishSequence int, cle
 			b.entrySequence[index] = entryEmpty
 		}
 	} else {
-		for i := 0; i < b.numEntries; i++ {
+		for i := range b.numEntries {
 			if cleanup != nil {
 				cleanup(&b.entries[i])
 			}
@@ -140,7 +140,7 @@ func (b *sequenceBuffer[T]) atIndex(index int) *T {
 func (b *sequenceBuffer[T]) generateAckBits() (ack uint16, ackBits uint32) {
 	ack = b.sequence - 1
 	mask := uint32(1)
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		sequence := ack - uint16(i)
 		if b.exists(sequence) {
 			ackBits |= mask

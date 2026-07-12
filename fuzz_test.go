@@ -22,8 +22,8 @@ func FuzzReceivePacket(f *testing.F) {
 
 	config := DefaultConfig()
 	config.Name = "fuzz"
-	config.TransmitPacketFunction = func(context any, id uint64, sequence uint16, packetData []byte) {}
-	config.ProcessPacketFunction = func(context any, id uint64, sequence uint16, packetData []byte) bool { return true }
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
 
 	endpoint, err := NewEndpoint(&config, 100.0)
 	if err != nil {

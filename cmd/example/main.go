@@ -19,23 +19,24 @@ type connection struct {
 var client connection
 var server connection
 
-func transmitPacket(context any, id uint64, sequence uint16, packetData []byte) {
-	// simulate 90% packet loss
+// transmitTo returns a transmit callback that delivers packets to the other
+// side of the connection. state reaches callbacks through closures like this
+// one, or through method values.
+func transmitTo(destination *connection) reliable.TransmitPacketFunction {
+	return func(id uint64, sequence uint16, packetData []byte) {
+		// simulate 90% packet loss
 
-	if rand.Intn(10) != 0 {
-		return
-	}
+		if rand.Intn(10) != 0 {
+			return
+		}
 
-	// send the packet directly to the other endpoint (normally this would be done via sockets...)
+		// send the packet directly to the other endpoint (normally this would be done via sockets...)
 
-	if context == &client {
-		server.endpoint.ReceivePacket(packetData)
-	} else {
-		client.endpoint.ReceivePacket(packetData)
+		destination.endpoint.ReceivePacket(packetData)
 	}
 }
 
-func processPacket(context any, id uint64, sequence uint16, packetData []byte) bool {
+func processPacket(id uint64, sequence uint16, packetData []byte) bool {
 	// read the packet here and process its contents, return false if the packet should not be acked
 
 	return true
@@ -50,17 +51,16 @@ func main() {
 
 	config := reliable.DefaultConfig()
 
-	config.MaxPacketSize = 32 * 1024               // maximum packet size that may be sent in bytes
-	config.FragmentAbove = 1200                    // fragment and reassemble packets above this size
-	config.MaxFragments = 32                       // maximum number of fragments per-packet
-	config.FragmentSize = 1024                     // the size of each fragment sent
-	config.TransmitPacketFunction = transmitPacket // set the callback function to transmit packets
-	config.ProcessPacketFunction = processPacket   // set the callback function to process packets
+	config.MaxPacketSize = 32 * 1024             // maximum packet size that may be sent in bytes
+	config.FragmentAbove = 1200                  // fragment and reassemble packets above this size
+	config.MaxFragments = 32                     // maximum number of fragments per-packet
+	config.FragmentSize = 1024                   // the size of each fragment sent
+	config.ProcessPacketFunction = processPacket // set the callback function to process packets
 
 	// create client connection
 
-	config.Context = &client
 	config.Name = "client"
+	config.TransmitPacketFunction = transmitTo(&server) // set the callback function to transmit packets
 	var err error
 	client.endpoint, err = reliable.NewEndpoint(&config, time)
 	if err != nil {
@@ -70,8 +70,8 @@ func main() {
 
 	// create server connection
 
-	config.Context = &server
 	config.Name = "server"
+	config.TransmitPacketFunction = transmitTo(&client)
 	server.endpoint, err = reliable.NewEndpoint(&config, time)
 	if err != nil {
 		fmt.Printf("error: could not create server endpoint: %v\n", err)

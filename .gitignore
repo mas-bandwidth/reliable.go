@@ -1,0 +1,6 @@
+# binaries
+/example
+/soak
+
+# fuzz corpus
+testdata/fuzz/

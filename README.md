@@ -1,4 +1,6 @@
 [![CI](https://github.com/mas-bandwidth/reliable.go/actions/workflows/ci.yml/badge.svg)](https://github.com/mas-bandwidth/reliable.go/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/mas-bandwidth/reliable.go.svg)](https://pkg.go.dev/github.com/mas-bandwidth/reliable.go)
+[![Go Report Card](https://goreportcard.com/badge/github.com/mas-bandwidth/reliable.go)](https://goreportcard.com/report/github.com/mas-bandwidth/reliable.go)
 
 # Introduction
 

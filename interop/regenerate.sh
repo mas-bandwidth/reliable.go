@@ -8,7 +8,12 @@
 
 set -euo pipefail
 
-RELIABLE_C_COMMIT=e00e11f587efca418820544cccaf085296155834 # reliable 1.3.4
+# Bumped 2026-07-26 from e00e11f (1.3.4). The regenerated transcript is BYTE-IDENTICAL
+# either way -- the wire did not move across those 21 commits -- so this changes what a
+# green TestWireCompatibility MEANS, not what it checks. At 1.3.4 the check proved
+# compatibility with a version one minor release behind, and would have stayed green
+# even if the wire HAD moved, because a pin has no staleness signal of its own.
+RELIABLE_C_COMMIT=c5be93c40e3951508a3dc05e23ab2ddd4fab676d # reliable 1.4.0
 
 here="$(cd "$(dirname "$0")" && pwd)"
 out="${1:-$here/../testdata/c_transcript.txt.gz}"

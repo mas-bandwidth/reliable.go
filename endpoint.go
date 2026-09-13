@@ -155,6 +155,27 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config.ProcessPacketFunction == nil {
 		return nil, errors.New("reliable: process packet function must not be nil")
 	}
+	if config.FragmentAbove > config.MaxPacketSize {
+		return nil, errors.New("reliable: fragment above must not exceed max packet size")
+	}
+	// max_fragments * fragment_size must cover max_packet_size. Both values are
+	// positive here, so the division form avoids overflowing a product.
+	maxInt := int(^uint(0) >> 1)
+	if config.MaxFragments <= (config.MaxPacketSize-1)/config.FragmentSize {
+		return nil, errors.New("reliable: max fragments times fragment size must cover max packet size")
+	}
+	if config.MaxFragments > (maxInt-MaxPacketHeaderBytes)/config.FragmentSize {
+		return nil, errors.New("reliable: max fragments times fragment size does not fit in a packet length")
+	}
+	if config.MaxPacketSize > maxInt-MaxPacketHeaderBytes-FragmentHeaderBytes {
+		return nil, errors.New("reliable: max packet size is too large for the receive length check")
+	}
+	if config.PacketHeaderSize < 0 {
+		return nil, errors.New("reliable: packet header size must not be negative")
+	}
+	if config.PacketHeaderSize > maxInt-config.MaxPacketSize {
+		return nil, errors.New("reliable: packet header size plus max packet size does not fit a packet length")
+	}
 
 	endpoint := &Endpoint{
 		config: *config,

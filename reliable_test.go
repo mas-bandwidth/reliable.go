@@ -1,6 +1,7 @@
 package reliable
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -198,6 +199,126 @@ func (ctx *testContext) transmitPacket(id uint64, sequence uint16, packetData []
 
 func testProcessPacketFunction(id uint64, sequence uint16, packetData []byte) bool {
 	return true
+}
+
+func endpointConfigForValidation() Config {
+	config := DefaultConfig()
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
+	return config
+}
+
+func TestNewEndpointFragmentConfigValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr string
+		modify  func(*Config)
+	}{
+		{
+			name:    "fragment threshold above maximum",
+			wantErr: "fragment above must not exceed max packet size",
+			modify: func(config *Config) {
+				config.FragmentAbove = config.MaxPacketSize + 1
+			},
+		},
+		{
+			name:    "fragment capacity one short",
+			wantErr: "max fragments times fragment size must cover max packet size",
+			modify: func(config *Config) {
+				config.MaxFragments = 4
+				config.FragmentSize = 1024
+				config.MaxPacketSize = 4*1024 + 1
+				config.FragmentAbove = 1024
+			},
+		},
+		{
+			name:    "fragment buffer length overflow",
+			wantErr: "max fragments times fragment size does not fit in a packet length",
+			modify: func(config *Config) {
+				maxInt := int(^uint(0) >> 1)
+				config.MaxFragments = 256
+				config.FragmentSize = (maxInt-MaxPacketHeaderBytes)/config.MaxFragments + 1
+				config.MaxPacketSize = 1
+				config.FragmentAbove = 1
+			},
+		},
+		{
+			name:    "receive length overflow",
+			wantErr: "max packet size is too large for the receive length check",
+			modify: func(config *Config) {
+				maxInt := int(^uint(0) >> 1)
+				config.MaxFragments = 1
+				config.FragmentSize = maxInt - MaxPacketHeaderBytes
+				config.MaxPacketSize = maxInt - MaxPacketHeaderBytes - FragmentHeaderBytes + 1
+				config.FragmentAbove = 1
+			},
+		},
+		{
+			name:    "packet header length overflow",
+			wantErr: "packet header size plus max packet size does not fit a packet length",
+			modify: func(config *Config) {
+				maxInt := int(^uint(0) >> 1)
+				config.MaxFragments = 1
+				config.FragmentSize = maxInt - MaxPacketHeaderBytes - FragmentHeaderBytes
+				config.MaxPacketSize = maxInt - MaxPacketHeaderBytes - FragmentHeaderBytes
+				config.FragmentAbove = 1
+			},
+		},
+		{
+			name:    "negative packet header size",
+			wantErr: "packet header size must not be negative",
+			modify: func(config *Config) {
+				config.PacketHeaderSize = -1
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := endpointConfigForValidation()
+			test.modify(&config)
+			endpoint, err := NewEndpoint(&config, 0)
+			if err == nil {
+				if endpoint != nil {
+					t.Fatal("expected invalid config to be refused")
+				}
+				t.Fatal("expected invalid config error")
+			}
+			if !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("expected error containing %q, got %q", test.wantErr, err)
+			}
+		})
+	}
+
+	t.Run("exact fragment capacity is valid", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		config.MaxFragments = 4
+		config.FragmentSize = 1024
+		config.MaxPacketSize = 4 * 1024
+		config.FragmentAbove = 1024
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("exactly covering config was refused: %v", err)
+		}
+		if endpoint == nil {
+			t.Fatal("expected endpoint for exactly covering config")
+		}
+	})
+
+	t.Run("fragment threshold equal to maximum is valid", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		config.MaxPacketSize = 1024
+		config.FragmentAbove = config.MaxPacketSize
+		config.MaxFragments = 1
+		config.FragmentSize = config.MaxPacketSize
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("equal threshold config was refused: %v", err)
+		}
+		if endpoint == nil {
+			t.Fatal("expected endpoint for equal threshold config")
+		}
+	})
 }
 
 // newTestEndpointPair creates a connected sender/receiver pair with the given

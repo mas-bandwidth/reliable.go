@@ -10,7 +10,7 @@ If this library helps you, please support it: **[Become a supporter](https://www
 
 It's useful in situations where you need to know which UDP packets you sent were received by the other side.
 
-It's a faithful port of the C library [reliable](https://github.com/mas-bandwidth/reliable) (v1.3.4) to modern, idiomatic Go.
+It's a faithful port of the C library [reliable](https://github.com/mas-bandwidth/reliable) (v1.4.4) to modern, idiomatic Go.
 
 It has the following features:
 

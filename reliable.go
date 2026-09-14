@@ -31,9 +31,9 @@ import (
 
 // Version of the C reliable library this package is ported from.
 const (
-	VersionFull  = "1.3.4"
+	VersionFull  = "1.4.4"
 	VersionMajor = 1
-	VersionMinor = 3
+	VersionMinor = 4
 	VersionPatch = 4
 )
 

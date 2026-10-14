@@ -40,6 +40,7 @@ config.MaxPacketSize = 32 * 1024
 config.FragmentAbove = 1200
 config.MaxFragments = 32
 config.FragmentSize = 1024
+config.FragmentReassemblyByteBudget = 256 * 1024
 config.TransmitPacketFunction = transmitPacket
 config.ProcessPacketFunction = processPacket
 
@@ -128,6 +129,8 @@ reliable.go is a packet acknowledgement system, not a full messaging layer. Keep
 1. Acks accumulate until you call `endpoint.ClearAcks`, so make sure you clear acks once you have processed them each frame. If the ack buffer fills up, additional acks are dropped and an error is logged.
 
 2. Endpoints are not thread safe. Use one endpoint per-goroutine, or protect each endpoint with your own lock. The log level and printf handler are global to the process.
+
+3. `FragmentReassemblyByteBudget` (256 KiB by default) caps the bytes an endpoint holds for packets still being reassembled from fragments. A first fragment whose buffer would push the unfinished total past the budget is refused and counted invalid; `0` restores the unbounded behaviour. The buffers are released on completion, eviction, reset and destroy.
 
 # Differences from the C library
 

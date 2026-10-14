@@ -31,6 +31,7 @@ type Config struct {
 	SentPacketsBufferSize        int                    // number of sent packets tracked for acks, packet loss and bandwidth stats
 	ReceivedPacketsBufferSize    int                    // number of received packets tracked. also the window for stale and duplicate packet rejection
 	FragmentReassemblyBufferSize int                    // number of packets that can be under reassembly from fragments at the same time
+	FragmentReassemblyByteBudget int                    // maximum bytes of unfinished reassembly buffers held at once. a first fragment that would exceed it is refused. 0 = unbounded
 	RTTSmoothingFactor           float64                // exponential smoothing factor for the rtt moving average
 	RTTHistorySize               int                    // number of rtt samples kept for min/max/avg rtt and jitter
 	PacketLossSmoothingFactor    float64                // exponential smoothing factor for packet loss
@@ -53,6 +54,7 @@ func DefaultConfig() Config {
 		SentPacketsBufferSize:        256,
 		ReceivedPacketsBufferSize:    256,
 		FragmentReassemblyBufferSize: 64,
+		FragmentReassemblyByteBudget: 256 * 1024,
 		RTTSmoothingFactor:           0.0025,
 		RTTHistorySize:               512,
 		PacketLossSmoothingFactor:    0.1,
@@ -85,8 +87,10 @@ type fragmentReassemblyData struct {
 }
 
 // fragmentReassemblyCleanup drops the reference to the reassembly packet
-// buffer so it can be garbage collected.
-func fragmentReassemblyCleanup(reassemblyData *fragmentReassemblyData) {
+// buffer so it can be garbage collected and returns its bytes to the
+// endpoint's outstanding reassembly total.
+func (endpoint *Endpoint) fragmentReassemblyCleanup(reassemblyData *fragmentReassemblyData) {
+	endpoint.reassemblyBytes -= len(reassemblyData.packetData)
 	*reassemblyData = fragmentReassemblyData{}
 }
 
@@ -114,6 +118,7 @@ type Endpoint struct {
 	sentPackets           *sequenceBuffer[sentPacketData]
 	receivedPackets       *sequenceBuffer[receivedPacketData]
 	fragmentReassembly    *sequenceBuffer[fragmentReassemblyData]
+	reassemblyBytes       int
 	counters              [NumCounters]uint64
 }
 
@@ -145,6 +150,9 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	}
 	if config.FragmentReassemblyBufferSize <= 0 {
 		return nil, errors.New("reliable: fragment reassembly buffer size must be positive")
+	}
+	if config.FragmentReassemblyByteBudget < 0 {
+		return nil, errors.New("reliable: fragment reassembly byte budget must not be negative")
 	}
 	if config.RTTHistorySize <= 0 {
 		return nil, errors.New("reliable: rtt history size must be positive")
@@ -427,7 +435,7 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 
 			receivedPacket := endpoint.receivedPackets.insert(sequence)
 
-			endpoint.fragmentReassembly.advanceWithCleanup(sequence, fragmentReassemblyCleanup)
+			endpoint.fragmentReassembly.advanceWithCleanup(sequence, endpoint.fragmentReassemblyCleanup)
 
 			receivedPacket.time = endpoint.time
 			receivedPacket.packetBytes = uint32(endpoint.config.PacketHeaderSize + packetBytes)
@@ -502,7 +510,7 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 		reassemblyData := endpoint.fragmentReassembly.find(sequence)
 
 		if reassemblyData == nil {
-			reassemblyData = endpoint.fragmentReassembly.insertWithCleanup(sequence, fragmentReassemblyCleanup)
+			reassemblyData = endpoint.fragmentReassembly.insertWithCleanup(sequence, endpoint.fragmentReassemblyCleanup)
 
 			if reassemblyData == nil {
 				logPrintf(LogLevelError, "[%s] ignoring invalid fragment. could not insert in reassembly buffer (stale)\n", endpoint.config.Name)
@@ -513,7 +521,23 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 			// the received-packets window moves when the reassembled packet is accepted,
 			// on the regular receive path below (see the regular packet branch).
 
-			packetBufferSize := MaxPacketHeaderBytes + numFragments*endpoint.config.FragmentSize
+			packetBufferSize := MaxPacketHeaderBytes + numFragments*endpoint.config.FragmentSize + 8
+
+			// a first fragment whose buffer would push unfinished reassemblies past the
+			// configured byte budget is refused. 0 means unbounded.
+
+			if endpoint.config.FragmentReassemblyByteBudget > 0 &&
+				endpoint.reassemblyBytes+packetBufferSize > endpoint.config.FragmentReassemblyByteBudget {
+				if debugLogging() {
+					logPrintf(LogLevelDebug, "[%s] ignoring fragment %d of packet %d. reassembly byte budget exceeded\n",
+						endpoint.config.Name, fragmentID, sequence)
+				}
+				endpoint.fragmentReassembly.removeWithCleanup(sequence, endpoint.fragmentReassemblyCleanup)
+				endpoint.counters[CounterNumFragmentsInvalid]++
+				return
+			}
+
+			endpoint.reassemblyBytes += packetBufferSize
 
 			reassemblyData.numFragmentsReceived = 0
 			reassemblyData.numFragmentsTotal = numFragments
@@ -556,7 +580,7 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 
 			endpoint.ReceivePacket(reassemblyData.packetData[start:finish])
 
-			endpoint.fragmentReassembly.removeWithCleanup(sequence, fragmentReassemblyCleanup)
+			endpoint.fragmentReassembly.removeWithCleanup(sequence, endpoint.fragmentReassemblyCleanup)
 		}
 
 		endpoint.counters[CounterNumFragmentsReceived]++
@@ -591,6 +615,8 @@ func (endpoint *Endpoint) Reset() {
 			reassemblyData.packetData = nil
 		}
 	}
+
+	endpoint.reassemblyBytes = 0
 
 	endpoint.sentPackets.reset()
 	endpoint.receivedPackets.reset()

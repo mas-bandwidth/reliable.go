@@ -610,10 +610,26 @@ func (endpoint *Endpoint) ClearAcks() {
 }
 
 // Reset resets the endpoint to its initial state: acks, counters, sequence
-// number and all tracking buffers are cleared.
+// number, statistics and all tracking buffers are cleared.
 func (endpoint *Endpoint) Reset() {
 	endpoint.acks = endpoint.acks[:0]
 	endpoint.sequence = 0
+
+	endpoint.rtt = 0
+	endpoint.rttMin = 0
+	endpoint.rttMax = 0
+	endpoint.rttAvg = 0
+	endpoint.jitterAvgVsMinRTT = 0
+	endpoint.jitterMaxVsMinRTT = 0
+	endpoint.jitterStddevVsAvgRTT = 0
+	endpoint.packetLoss = 0
+	endpoint.sentBandwidthKbps = 0
+	endpoint.receivedBandwidthKbps = 0
+	endpoint.ackedBandwidthKbps = 0
+
+	for i := range endpoint.rttHistoryBuffer {
+		endpoint.rttHistoryBuffer[i] = -1.0
+	}
 
 	endpoint.counters = [NumCounters]uint64{}
 
@@ -639,7 +655,7 @@ func (endpoint *Endpoint) Update(time float64) {
 
 	// calculate min and max rtt
 	{
-		minRTT := 10000.0
+		minRTT := math.MaxFloat64
 		maxRTT := 0.0
 		sumRTT := 0.0
 		count := 0
@@ -655,14 +671,13 @@ func (endpoint *Endpoint) Update(time float64) {
 				count++
 			}
 		}
-		if minRTT == 10000.0 {
-			minRTT = 0.0
-		}
-		endpoint.rttMin = minRTT
-		endpoint.rttMax = maxRTT
 		if count > 0 {
+			endpoint.rttMin = minRTT
+			endpoint.rttMax = maxRTT
 			endpoint.rttAvg = sumRTT / float64(count)
 		} else {
+			endpoint.rttMin = 0.0
+			endpoint.rttMax = 0.0
 			endpoint.rttAvg = 0.0
 		}
 	}

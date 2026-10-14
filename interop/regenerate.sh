@@ -16,7 +16,12 @@ set -euo pipefail
 # So this changes what a green TestWireCompatibility MEANS, not what it checks: the
 # check now proves compatibility with the current C release rather than with one
 # four patch releases behind. A pin has no staleness signal of its own.
-RELIABLE_C_COMMIT=d4b6fe0882d2d752d57984f70e7a29037982984f # reliable 1.4.4
+# Regenerated 2026-10-14 from C PR 68 (merge dfd5541c): the fix removes the early
+# received-packets advance in the fragment path and refuses stale fragments there,
+# so receiver acks in this lossy scenario move with the fix and the wire bytes of
+# the transcript legitimately change. C is normative and the golden follows it; the
+# Go port reproduces the post-fix C transcript byte for byte.
+RELIABLE_C_COMMIT=dfd5541c2ec82e912e67420c07361a3c48bfaa68 # reliable PR 68 (fragment window advance fix)
 
 here="$(cd "$(dirname "$0")" && pwd)"
 out="${1:-$here/../testdata/c_transcript.txt.gz}"

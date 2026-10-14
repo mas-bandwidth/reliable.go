@@ -17,6 +17,7 @@ func FuzzReceivePacket(f *testing.F) {
 	}
 
 	f.Add([]byte{1, 0, 0, 0, 1, 0xDE, 0xAD, 0xBE, 0xEF})
+	f.Add([]byte{})
 	f.Add([]byte{0})
 	f.Add([]byte{1})
 

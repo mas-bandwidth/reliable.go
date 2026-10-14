@@ -213,11 +213,11 @@ func cConfigSpecs() []string {
 		}
 	}
 
-	maxInt := int(^uint(0) >> 1)
+	maxInt := int(^uint32(0) >> 1)
 	edge := maxInt - MaxPacketHeaderBytes - FragmentHeaderBytes
 	specs = append(specs,
-		fmt.Sprintf("packet_header_size=28,max_packet_size=%d", edge),
-		fmt.Sprintf("packet_header_size=28,max_packet_size=%d", edge+1),
+		fmt.Sprintf("packet_header_size=28,max_packet_size=%d", edge-28),
+		fmt.Sprintf("packet_header_size=28,max_packet_size=%d", edge-27),
 		fmt.Sprintf("packet_header_size=9,max_packet_size=%d", maxInt-MaxPacketHeaderBytes-FragmentHeaderBytes-9),
 	)
 

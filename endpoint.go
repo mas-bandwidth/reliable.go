@@ -490,6 +490,15 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 			return
 		}
 
+		if !endpoint.receivedPackets.testInsert(sequence) {
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] ignoring stale fragment %d of packet %d\n",
+					endpoint.config.Name, fragmentID, sequence)
+			}
+			endpoint.counters[CounterNumFragmentsInvalid]++
+			return
+		}
+
 		reassemblyData := endpoint.fragmentReassembly.find(sequence)
 
 		if reassemblyData == nil {
@@ -501,7 +510,8 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 				return
 			}
 
-			endpoint.receivedPackets.advance(sequence)
+			// the received-packets window moves when the reassembled packet is accepted,
+			// on the regular receive path below (see the regular packet branch).
 
 			packetBufferSize := MaxPacketHeaderBytes + numFragments*endpoint.config.FragmentSize
 

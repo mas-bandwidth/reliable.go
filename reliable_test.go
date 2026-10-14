@@ -607,6 +607,45 @@ func TestStalePackets(t *testing.T) {
 	}
 }
 
+// TestReceiveEmptyPacketIsCountedInvalid pins the behaviour the C reference
+// gained in 190bce5b: a zero length packet is refused and counted invalid
+// before any byte is read, and the process callback does not run. A nil slice
+// has length zero and is covered by the same check.
+func TestReceiveEmptyPacketIsCountedInvalid(t *testing.T) {
+	time := 100.0
+
+	processed := 0
+
+	config := DefaultConfig()
+	config.Name = "receiver"
+
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+		processed++
+		return true
+	}
+
+	endpoint, err := NewEndpoint(&config, time)
+	if err != nil {
+		t.Fatalf("could not create endpoint: %v", err)
+	}
+
+	for i, packetData := range [][]byte{nil, {}} {
+		before := endpoint.Counters()[CounterNumPacketsInvalid]
+
+		endpoint.ReceivePacket(packetData)
+
+		after := endpoint.Counters()[CounterNumPacketsInvalid]
+		if after != before+1 {
+			t.Fatalf("input %d: expected the invalid counter to rise by one, rose by %d", i, after-before)
+		}
+	}
+
+	if processed != 0 {
+		t.Fatalf("expected the process callback not to run, ran %d times", processed)
+	}
+}
+
 const (
 	testAckBufferOverflowNumPackets = 32
 	testAckBufferOverflowBufferSize = 16

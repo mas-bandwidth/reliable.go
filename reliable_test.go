@@ -607,6 +607,117 @@ func TestStalePackets(t *testing.T) {
 	}
 }
 
+// TestUnfinishedFragmentDoesNotStalePackets pins that a lone fragment does not
+// move the received-packets window before its packet is reassembled and
+// accepted. A fragment that fails the stale test is refused and counted
+// instead. The cases mirror the C reference test for the same fix:
+//
+//	A: a last fragment inside the window (sequence 512) leaves a genuine
+//	   sequence 0 deliverable and counts no stale packets.
+//	B: a last fragment outside the window (sequence 32512) is refused before
+//	   any reassembly entry exists, and sequence 0 is still delivered.
+//	C: an in-order fragmented packet (1.5 x fragment size) at sequence 0 still
+//	   reassembles from two fragments and delivers at full size.
+func TestUnfinishedFragmentDoesNotStalePackets(t *testing.T) {
+	time := 100.0
+
+	// a lone last fragment of a 2-fragment packet: prefix 1, sequence little
+	// endian, fragment id 1, count-1 1, then payloadBytes payload bytes.
+	fragmentAt := func(sequence uint16, payloadBytes int) []byte {
+		fragment := []byte{1, byte(sequence), byte(sequence >> 8), 1, 1}
+		for i := 0; i < payloadBytes; i++ {
+			fragment = append(fragment, byte(i+1))
+		}
+		return fragment
+	}
+
+	runFragmentCase := func(t *testing.T, fragmentSequence uint16, payloadBytes int) (*testContext, bool, uint16) {
+		t.Helper()
+
+		context := newTestContext()
+
+		var delivered bool
+		var deliveredSequence uint16
+
+		newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+			receiverConfig.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+				if !delivered {
+					delivered = true
+					deliveredSequence = sequence
+				}
+				return true
+			}
+		})
+
+		// the lone fragment must not move the received window before its packet is accepted
+
+		context.receiver.ReceivePacket(fragmentAt(fragmentSequence, payloadBytes))
+
+		// a genuine packet at sequence 0 from the sender must still be delivered
+
+		context.sender.SendPacket([]byte("data"))
+
+		return context, delivered, deliveredSequence
+	}
+
+	t.Run("case A: fragment inside the window leaves sequence 0 deliverable", func(t *testing.T) {
+		context, delivered, deliveredSequence := runFragmentCase(t, 512, 0)
+
+		if !delivered || deliveredSequence != 0 {
+			t.Fatalf("expected genuine sequence 0 to be delivered, got delivered=%v sequence=%d", delivered, deliveredSequence)
+		}
+
+		counters := context.receiver.Counters()
+		if counters[CounterNumPacketsStale] != 0 {
+			t.Fatalf("expected 0 stale packets, got %d", counters[CounterNumPacketsStale])
+		}
+		if counters[CounterNumFragmentsInvalid] != 0 {
+			t.Fatalf("expected 0 invalid fragments, got %d", counters[CounterNumFragmentsInvalid])
+		}
+	})
+
+	t.Run("case B: fragment outside the window is refused before reassembly", func(t *testing.T) {
+		context, delivered, deliveredSequence := runFragmentCase(t, 32512, 0)
+
+		if context.receiver.fragmentReassembly.exists(32512) {
+			t.Fatal("expected no reassembly entry for refused fragment 32512")
+		}
+		if !delivered || deliveredSequence != 0 {
+			t.Fatalf("expected genuine sequence 0 to be delivered, got delivered=%v sequence=%d", delivered, deliveredSequence)
+		}
+
+		counters := context.receiver.Counters()
+		if counters[CounterNumPacketsStale] != 0 {
+			t.Fatalf("expected 0 stale packets, got %d", counters[CounterNumPacketsStale])
+		}
+		if counters[CounterNumFragmentsInvalid] != 1 {
+			t.Fatalf("expected 1 invalid fragment, got %d", counters[CounterNumFragmentsInvalid])
+		}
+	})
+
+	t.Run("case C: in-order fragmented packet still delivers at full size", func(t *testing.T) {
+		context := newTestContext()
+
+		deliveredBytes := -1
+
+		newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+			receiverConfig.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+				deliveredBytes = len(packetData)
+				return true
+			}
+		})
+
+		fragmentSize := context.sender.config.FragmentSize
+		packet := make([]byte, fragmentSize+fragmentSize/2)
+
+		context.sender.SendPacket(packet)
+
+		if deliveredBytes != len(packet) {
+			t.Fatalf("expected fragmented packet to deliver %d bytes, got %d", len(packet), deliveredBytes)
+		}
+	})
+}
+
 const (
 	testAckBufferOverflowNumPackets = 32
 	testAckBufferOverflowBufferSize = 16

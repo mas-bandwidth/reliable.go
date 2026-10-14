@@ -297,6 +297,13 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 				config.PacketHeaderSize = -1
 			},
 		},
+		{
+			name:    "negative fragment reassembly byte budget",
+			wantErr: "fragment reassembly byte budget must not be negative",
+			modify: func(config *Config) {
+				config.FragmentReassemblyByteBudget = -1
+			},
+		},
 	}
 
 	for _, test := range tests {

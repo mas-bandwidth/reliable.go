@@ -1,6 +1,7 @@
 package reliable
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -208,6 +209,19 @@ func endpointConfigForValidation() Config {
 	return config
 }
 
+// newEndpointOrError creates an endpoint, turning a panic (for example an
+// out-of-range make on a config that should have been refused) into an error so
+// a validation test fails cleanly instead of crashing the test binary.
+func newEndpointOrError(config *Config) (endpoint *Endpoint, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			endpoint = nil
+			err = fmt.Errorf("panic: %v", recovered)
+		}
+	}()
+	return NewEndpoint(config, 0)
+}
+
 func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -265,6 +279,18 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 			},
 		},
 		{
+			name:    "packet header plus max packet size overflow",
+			wantErr: "packet header size plus max packet size does not fit a packet length",
+			modify: func(config *Config) {
+				maxInt := int(^uint(0) >> 1)
+				config.MaxFragments = 1
+				config.FragmentSize = maxInt - MaxPacketHeaderBytes - FragmentHeaderBytes
+				config.MaxPacketSize = maxInt - MaxPacketHeaderBytes - FragmentHeaderBytes - 1
+				config.FragmentAbove = 1
+				config.PacketHeaderSize = MaxPacketHeaderBytes + FragmentHeaderBytes + 1
+			},
+		},
+		{
 			name:    "negative packet header size",
 			wantErr: "packet header size must not be negative",
 			modify: func(config *Config) {
@@ -277,7 +303,7 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			config := endpointConfigForValidation()
 			test.modify(&config)
-			endpoint, err := NewEndpoint(&config, 0)
+			endpoint, err := newEndpointOrError(&config)
 			if err == nil {
 				if endpoint != nil {
 					t.Fatal("expected invalid config to be refused")
@@ -288,6 +314,60 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %q", test.wantErr, err)
 			}
 		})
+	}
+
+	for _, field := range []struct {
+		name string
+		set  func(*Config, int)
+		word string
+	}{
+		{"sent packets buffer size", func(config *Config, value int) { config.SentPacketsBufferSize = value }, "sent packets buffer size"},
+		{"received packets buffer size", func(config *Config, value int) { config.ReceivedPacketsBufferSize = value }, "received packets buffer size"},
+		{"fragment reassembly buffer size", func(config *Config, value int) { config.FragmentReassemblyBufferSize = value }, "fragment reassembly buffer size"},
+	} {
+		for _, value := range []int{100, 32768, 65535, 65536} {
+			t.Run(fmt.Sprintf("%s %d is refused", field.name, value), func(t *testing.T) {
+				config := endpointConfigForValidation()
+				field.set(&config, value)
+				endpoint, err := newEndpointOrError(&config)
+				if err == nil {
+					if endpoint != nil {
+						t.Fatalf("expected %s %d to be refused", field.name, value)
+					}
+					t.Fatalf("expected %s %d to return an error", field.name, value)
+				}
+				wantErr := field.word + " must be a power of two no larger than 16384"
+				if !strings.Contains(err.Error(), wantErr) {
+					t.Fatalf("expected error containing %q, got %q", wantErr, err)
+				}
+			})
+		}
+	}
+
+	for _, field := range []struct {
+		name string
+		set  func(*Config, int)
+	}{
+		{"sent packets buffer size", func(config *Config, value int) { config.SentPacketsBufferSize = value }},
+		{"received packets buffer size", func(config *Config, value int) { config.ReceivedPacketsBufferSize = value }},
+		{"fragment reassembly buffer size", func(config *Config, value int) { config.FragmentReassemblyBufferSize = value }},
+	} {
+		for _, value := range []int{256, 16384} {
+			t.Run(fmt.Sprintf("%s %d is acked", field.name, value), func(t *testing.T) {
+				context := newTestContext()
+				newTestEndpointPair(t, context, 100.0, func(senderConfig, receiverConfig *Config) {
+					field.set(senderConfig, value)
+					field.set(receiverConfig, value)
+				})
+
+				context.sender.SendPacket([]byte{0x00})
+				context.receiver.SendPacket([]byte{0x00})
+
+				if len(context.sender.Acks()) == 0 {
+					t.Fatalf("expected a one-byte send with %s %d to be acked", field.name, value)
+				}
+			})
+		}
 	}
 
 	t.Run("exact fragment capacity is valid", func(t *testing.T) {
@@ -317,6 +397,65 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 		}
 		if endpoint == nil {
 			t.Fatal("expected endpoint for equal threshold config")
+		}
+	})
+}
+
+// TestSequenceBufferSizesMustBePowersOfTwo pins the rule C applies to the three
+// sequence buffers: each size must be a power of two in [1,16384]. A size that
+// is not makes sequence 0 stale on a cold buffer, and a size that does not
+// divide 65536 aliases after the sequence wraps.
+func TestSequenceBufferSizesMustBePowersOfTwo(t *testing.T) {
+	fields := []struct {
+		name string
+		set  func(*Config, int)
+	}{
+		{"sent packets buffer size", func(config *Config, value int) { config.SentPacketsBufferSize = value }},
+		{"received packets buffer size", func(config *Config, value int) { config.ReceivedPacketsBufferSize = value }},
+		{"fragment reassembly buffer size", func(config *Config, value int) { config.FragmentReassemblyBufferSize = value }},
+	}
+
+	sizes := []int{0, 1, 2, 3, 100, 255, 256, 257, 16383, 16384, 16385, 32768, 65535, 65536, 65537}
+
+	for _, field := range fields {
+		for _, size := range sizes {
+			t.Run(fmt.Sprintf("%s %d", field.name, size), func(t *testing.T) {
+				config := endpointConfigForValidation()
+				field.set(&config, size)
+				endpoint, err := newEndpointOrError(&config)
+
+				valid := size > 0 && size <= 16384 && size&(size-1) == 0
+				if valid {
+					if err != nil {
+						t.Fatalf("expected %s %d to be accepted, got %v", field.name, size, err)
+					}
+					if endpoint == nil {
+						t.Fatalf("expected an endpoint for %s %d", field.name, size)
+					}
+					return
+				}
+
+				if err == nil {
+					t.Fatalf("expected %s %d to be refused", field.name, size)
+				}
+				wantErr := field.name + " must be a power of two no larger than 16384"
+				if !strings.Contains(err.Error(), wantErr) {
+					t.Fatalf("expected error containing %q, got %q", wantErr, err)
+				}
+			})
+		}
+	}
+
+	t.Run("ack buffer and rtt history stay on positivity", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		config.AckBufferSize = 100
+		config.RTTHistorySize = 100
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("a non-power-of-two ack buffer or rtt history was refused: %v", err)
+		}
+		if endpoint == nil {
+			t.Fatal("expected an endpoint for a non-power-of-two ack buffer and rtt history")
 		}
 	})
 }

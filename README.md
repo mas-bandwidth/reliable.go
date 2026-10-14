@@ -51,6 +51,8 @@ if err != nil {
 
 For example, in a client/server setup you would have one endpoint on each client, and n endpoints on the server, one for each client slot.
 
+`SentPacketsBufferSize`, `ReceivedPacketsBufferSize` and `FragmentReassemblyBufferSize` must each be a power of two no larger than 16384, because the buffers are indexed by the 16 bit sequence number modulo the size. `NewEndpoint` returns an error for any other size. `AckBufferSize` and `RTTHistorySize` are not sequence buffers and only need to be positive.
+
 Next, create a function to transmit packets:
 
 ```go

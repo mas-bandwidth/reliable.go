@@ -1179,6 +1179,90 @@ func TestFragmentCleanup(t *testing.T) {
 	}
 }
 
+// TestUnfinishedReassemblyRespectsByteBudget pins that a first fragment whose
+// buffer would push unfinished reassemblies past FragmentReassemblyByteBudget
+// is refused and counted, so five bytes on the wire cannot hold a full
+// reassembly buffer per slot. It mirrors the C reference test
+// test_unfinished_reassembly_respects_byte_budget: 64 last fragments for
+// sequences 0..63, each claiming 16 fragments, with the budget at 64 KiB.
+func TestUnfinishedReassemblyRespectsByteBudget(t *testing.T) {
+	time := 100.0
+
+	config := DefaultConfig()
+	config.Name = "receiver"
+	config.FragmentReassemblyByteBudget = 64 * 1024
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
+
+	endpoint, err := NewEndpoint(&config, time)
+	if err != nil {
+		t.Fatalf("could not create endpoint: %v", err)
+	}
+
+	budget := config.FragmentReassemblyByteBudget
+
+	// one slot is the room a first fragment allocates for a full packet,
+	// the 8 spare bytes the C reference reserves included.
+
+	slotBytes := MaxPacketHeaderBytes + config.MaxFragments*config.FragmentSize + 8
+
+	heldBytes := func() int {
+		total := 0
+		for i := 0; i < endpoint.fragmentReassembly.numEntries; i++ {
+			if entry := endpoint.fragmentReassembly.atIndex(i); entry != nil {
+				total += len(entry.packetData)
+			}
+		}
+		return total
+	}
+
+	for sequence := 0; sequence < 64; sequence++ {
+		fragment := make([]byte, FragmentHeaderBytes+config.FragmentSize)
+		fragment[0] = 1
+		fragment[1] = byte(sequence)
+		fragment[2] = byte(sequence >> 8)
+		fragment[3] = byte(config.MaxFragments - 1)
+		fragment[4] = byte(config.MaxFragments - 1)
+		for i := FragmentHeaderBytes; i < len(fragment); i++ {
+			fragment[i] = 0x5A
+		}
+
+		endpoint.ReceivePacket(fragment)
+
+		if endpoint.reassemblyBytes > budget+slotBytes {
+			t.Fatalf("sequence %d: endpoint reassembly bytes %d exceed the budget plus one slot %d", sequence, endpoint.reassemblyBytes, budget+slotBytes)
+		}
+		held := heldBytes()
+		if held != endpoint.reassemblyBytes {
+			t.Fatalf("sequence %d: endpoint reassembly bytes %d do not match the sum of held buffers %d", sequence, endpoint.reassemblyBytes, held)
+		}
+		if held > budget+slotBytes {
+			t.Fatalf("sequence %d: held reassembly bytes %d exceed the budget plus one slot %d", sequence, held, budget+slotBytes)
+		}
+	}
+
+	if endpoint.reassemblyBytes == 0 {
+		t.Fatal("expected at least one unfinished reassembly to be held within the budget")
+	}
+	if endpoint.reassemblyBytes > budget {
+		t.Fatalf("expected reassembly bytes within the budget %d, got %d", budget, endpoint.reassemblyBytes)
+	}
+
+	counters := endpoint.Counters()
+	if counters[CounterNumFragmentsInvalid] == 0 {
+		t.Fatal("expected some first fragments to be refused by the byte budget")
+	}
+
+	endpoint.Reset()
+
+	if endpoint.reassemblyBytes != 0 {
+		t.Fatalf("expected reassembly bytes 0 after reset, got %d", endpoint.reassemblyBytes)
+	}
+	if held := heldBytes(); held != 0 {
+		t.Fatalf("expected no held reassembly buffers after reset, got %d bytes", held)
+	}
+}
+
 func TestEndpointReset(t *testing.T) {
 	time := 100.0
 

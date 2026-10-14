@@ -1364,3 +1364,144 @@ func TestEndpointReset(t *testing.T) {
 		t.Fatal("expected receiver to have received packets after reset")
 	}
 }
+
+func TestEndpointResetClearsStats(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	newTestEndpointPair(t, context, time, nil)
+
+	packet := make([]byte, 64)
+
+	for i := 0; i < 300; i++ {
+		context.drop = i%5 == 0
+
+		context.sender.SendPacket(packet)
+
+		context.drop = false
+
+		time += 0.1
+		if i%3 == 0 {
+			time += 0.05
+		}
+
+		context.sender.Update(time)
+		context.receiver.Update(time)
+
+		context.receiver.SendPacket(packet)
+
+		time += 0.1
+
+		context.sender.Update(time)
+		context.receiver.Update(time)
+
+		context.sender.ClearAcks()
+		context.receiver.ClearAcks()
+	}
+
+	if context.sender.RTT() == 0 {
+		t.Fatal("expected a non-zero rtt before reset")
+	}
+	if context.sender.RTTMin() == 0 {
+		t.Fatal("expected a non-zero rtt minimum before reset")
+	}
+	if context.sender.RTTMax() == 0 {
+		t.Fatal("expected a non-zero rtt maximum before reset")
+	}
+	if context.sender.RTTAvg() == 0 {
+		t.Fatal("expected a non-zero rtt average before reset")
+	}
+	if context.sender.JitterAvgVsMinRTT() == 0 && context.sender.JitterMaxVsMinRTT() == 0 {
+		t.Fatal("expected non-zero jitter before reset")
+	}
+	if context.sender.PacketLoss() == 0 {
+		t.Fatal("expected non-zero packet loss before reset")
+	}
+	sent, received, acked := context.sender.Bandwidth()
+	if sent == 0 || received == 0 || acked == 0 {
+		t.Fatalf("expected non-zero bandwidth before reset, got sent %v received %v acked %v", sent, received, acked)
+	}
+
+	context.sender.Reset()
+
+	if context.sender.RTT() != 0 {
+		t.Fatalf("expected rtt 0 after reset, got %v", context.sender.RTT())
+	}
+	if context.sender.RTTMin() != 0 {
+		t.Fatalf("expected rtt min 0 after reset, got %v", context.sender.RTTMin())
+	}
+	if context.sender.RTTMax() != 0 {
+		t.Fatalf("expected rtt max 0 after reset, got %v", context.sender.RTTMax())
+	}
+	if context.sender.RTTAvg() != 0 {
+		t.Fatalf("expected rtt avg 0 after reset, got %v", context.sender.RTTAvg())
+	}
+	if context.sender.JitterAvgVsMinRTT() != 0 {
+		t.Fatalf("expected jitter avg 0 after reset, got %v", context.sender.JitterAvgVsMinRTT())
+	}
+	if context.sender.JitterMaxVsMinRTT() != 0 {
+		t.Fatalf("expected jitter max 0 after reset, got %v", context.sender.JitterMaxVsMinRTT())
+	}
+	if context.sender.JitterStddevVsAvgRTT() != 0 {
+		t.Fatalf("expected jitter stddev 0 after reset, got %v", context.sender.JitterStddevVsAvgRTT())
+	}
+	if context.sender.PacketLoss() != 0 {
+		t.Fatalf("expected packet loss 0 after reset, got %v", context.sender.PacketLoss())
+	}
+	sent, received, acked = context.sender.Bandwidth()
+	if sent != 0 || received != 0 || acked != 0 {
+		t.Fatalf("expected bandwidth 0 after reset, got sent %v received %v acked %v", sent, received, acked)
+	}
+	for i, sample := range context.sender.rttHistoryBuffer {
+		if sample != -1 {
+			t.Fatalf("expected rtt history %d to be -1 after reset, got %v", i, sample)
+		}
+	}
+
+	time += 0.1
+	context.sender.Update(time)
+
+	if context.sender.RTTMin() != 0 || context.sender.RTTMax() != 0 || context.sender.RTTAvg() != 0 {
+		t.Fatalf("update after reset resurrected rtt stats: min %v max %v avg %v", context.sender.RTTMin(), context.sender.RTTMax(), context.sender.RTTAvg())
+	}
+}
+
+func TestRTTMinLarge(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	newTestEndpointPair(t, context, time, nil)
+
+	packet := make([]byte, 8)
+
+	for _, delay := range []float64{10.0, 12.0, 20.0} {
+		context.sender.Update(time)
+		context.receiver.Update(time)
+
+		context.sender.SendPacket(packet)
+
+		time += delay
+
+		context.sender.Update(time)
+		context.receiver.Update(time)
+
+		context.receiver.SendPacket(packet)
+
+		context.sender.Update(time)
+
+		context.sender.ClearAcks()
+		context.receiver.ClearAcks()
+	}
+
+	if got := context.sender.RTTMin(); got != 10000.0 {
+		t.Fatalf("expected rtt min 10000, got %v", got)
+	}
+	if got := context.sender.RTTMax(); got != 20000.0 {
+		t.Fatalf("expected rtt max 20000, got %v", got)
+	}
+	if got := context.sender.RTTAvg(); got != 14000.0 {
+		t.Fatalf("expected rtt avg 14000, got %v", got)
+	}
+}

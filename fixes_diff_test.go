@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -601,6 +602,178 @@ func TestCDifferentialReassembly(t *testing.T) {
 
 	goLines := strings.Split(goTranscript.String(), "\n")
 	cLines := strings.Split(cTranscript.String(), "\n")
+	for i := 0; i < len(goLines) && i < len(cLines); i++ {
+		if goLines[i] != cLines[i] {
+			t.Fatalf("differential transcript diverges from the C reference at line %d:\n  c: %s\ngo: %s", i+1, cLines[i], goLines[i])
+		}
+	}
+	t.Fatalf("differential transcript line count differs from the C reference: c %d lines, go %d lines", len(cLines), len(goLines))
+}
+
+func float32BitsHex(value float64) string {
+	return fmt.Sprintf("%08x", math.Float32bits(float32(value)))
+}
+
+func statsLine(step string, endpoint *Endpoint) string {
+	sent, received, acked := endpoint.Bandwidth()
+	return fmt.Sprintf("%s rtt %s rtt_min %s rtt_max %s rtt_avg %s jitter_avg %s jitter_max %s jitter_stddev %s loss %s sent_kbps %s received_kbps %s acked_kbps %s\n",
+		step,
+		float32BitsHex(endpoint.RTT()),
+		float32BitsHex(endpoint.RTTMin()),
+		float32BitsHex(endpoint.RTTMax()),
+		float32BitsHex(endpoint.RTTAvg()),
+		float32BitsHex(endpoint.JitterAvgVsMinRTT()),
+		float32BitsHex(endpoint.JitterMaxVsMinRTT()),
+		float32BitsHex(endpoint.JitterStddevVsAvgRTT()),
+		float32BitsHex(endpoint.PacketLoss()),
+		float32BitsHex(sent),
+		float32BitsHex(received),
+		float32BitsHex(acked),
+	)
+}
+
+type statsPair struct {
+	drop     bool
+	sender   *Endpoint
+	receiver *Endpoint
+}
+
+func (pair *statsPair) transmit(id uint64, sequence uint16, packetData []byte) {
+	if pair.drop {
+		return
+	}
+	if id == 0 {
+		pair.receiver.ReceivePacket(packetData)
+	} else if id == 1 {
+		pair.sender.ReceivePacket(packetData)
+	}
+}
+
+func newStatsPair(t *testing.T, time float64) *statsPair {
+	t.Helper()
+
+	pair := &statsPair{}
+
+	senderConfig := DefaultConfig()
+	receiverConfig := DefaultConfig()
+	senderConfig.Name = "sender"
+	senderConfig.ID = 0
+	receiverConfig.Name = "receiver"
+	receiverConfig.ID = 1
+	senderConfig.SentPacketsBufferSize = 1024
+	senderConfig.ReceivedPacketsBufferSize = 1024
+	receiverConfig.SentPacketsBufferSize = 1024
+	receiverConfig.ReceivedPacketsBufferSize = 1024
+	senderConfig.TransmitPacketFunction = pair.transmit
+	receiverConfig.TransmitPacketFunction = pair.transmit
+	senderConfig.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
+	receiverConfig.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
+
+	var err error
+	pair.sender, err = NewEndpoint(&senderConfig, time)
+	if err != nil {
+		t.Fatalf("could not create sender: %v", err)
+	}
+	pair.receiver, err = NewEndpoint(&receiverConfig, time)
+	if err != nil {
+		t.Fatalf("could not create receiver: %v", err)
+	}
+	return pair
+}
+
+// runGoStatsDifferential is the port side of the stats schedule in
+// interop/fixes_oracle.c. Keep the two in lockstep.
+func runGoStatsDifferential(t *testing.T) string {
+	t.Helper()
+
+	var b strings.Builder
+
+	fresh := newStatsPair(t, 100.0)
+	b.WriteString(statsLine("fresh", fresh.sender))
+
+	time := 100.0
+	large := newStatsPair(t, time)
+	small := make([]byte, 8)
+	for _, delay := range []float64{10.0, 12.0, 20.0} {
+		large.sender.Update(time)
+		large.receiver.Update(time)
+		large.sender.SendPacket(small)
+		time += delay
+		large.sender.Update(time)
+		large.receiver.Update(time)
+		large.receiver.SendPacket(small)
+		large.sender.Update(time)
+		large.sender.ClearAcks()
+		large.receiver.ClearAcks()
+	}
+	b.WriteString(statsLine("large", large.sender))
+
+	time = 100.0
+	exchange := newStatsPair(t, time)
+	packet := make([]byte, 32)
+	for i := 0; i < 200; i++ {
+		exchange.sender.Update(time)
+		exchange.receiver.Update(time)
+		exchange.drop = i%7 == 0
+		exchange.sender.SendPacket(packet)
+		exchange.drop = false
+		time += 0.125
+		exchange.sender.Update(time)
+		exchange.receiver.Update(time)
+		exchange.receiver.SendPacket(packet)
+		time += 0.125
+		exchange.sender.Update(time)
+		exchange.receiver.Update(time)
+		exchange.sender.ClearAcks()
+		exchange.receiver.ClearAcks()
+	}
+	b.WriteString(statsLine("exchange", exchange.sender))
+	exchange.sender.Reset()
+	b.WriteString(statsLine("reset", exchange.sender))
+
+	return b.String()
+}
+
+func runCOracleStats(t *testing.T, oracleBin string) string {
+	t.Helper()
+
+	cmd := exec.Command(oracleBin, "stats")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("could not run the C stats oracle: %v", err)
+	}
+	return string(out)
+}
+
+// TestCDifferentialStats feeds the same statistics schedule through the C
+// reference and this port and compares the transcripts byte for byte. Floats
+// are the raw 32-bit pattern of the value rounded to float32, which is how C
+// stores them. Gated on RELIABLE_C_DIR so the unit gate stays hermetic:
+//
+//	RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .
+func TestCDifferentialStats(t *testing.T) {
+	cDir := os.Getenv("RELIABLE_C_DIR")
+	if cDir == "" {
+		t.Skip("RELIABLE_C_DIR is not set; skipping the differential test against the C reference. Set it to a checkout of mas-bandwidth/reliable holding the fix (branch sprint/reliable-audit-fixes at or after eb2c9698) and run: RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .")
+	}
+
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Fatalf("a C compiler is required for the C reference leg: %v", err)
+	}
+
+	oracleBin := buildCOracle(t, cDir)
+	goTranscript := runGoStatsDifferential(t)
+	cTranscript := runCOracleStats(t, oracleBin)
+
+	if goTranscript == cTranscript {
+		return
+	}
+
+	t.Logf("C reference transcript:\n%s", cTranscript)
+	t.Logf("Go port transcript:\n%s", goTranscript)
+
+	goLines := strings.Split(goTranscript, "\n")
+	cLines := strings.Split(cTranscript, "\n")
 	for i := 0; i < len(goLines) && i < len(cLines); i++ {
 		if goLines[i] != cLines[i] {
 			t.Fatalf("differential transcript diverges from the C reference at line %d:\n  c: %s\ngo: %s", i+1, cLines[i], goLines[i])

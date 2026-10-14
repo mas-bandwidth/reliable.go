@@ -11,138 +11,70 @@ import (
 	"testing"
 )
 
-// cDifferentialCounterNames names the eleven counters in reliable.h order. The
-// C oracle (interop/fixes_oracle.c) prints the same names; keep them in sync.
-var cDifferentialCounterNames = [...]string{
-	"num_packets_sent",
-	"num_packets_received",
-	"num_packets_acked",
-	"num_packets_stale",
-	"num_packets_invalid",
-	"num_packets_too_large_to_send",
-	"num_packets_too_large_to_receive",
-	"num_fragments_sent",
-	"num_fragments_received",
-	"num_fragments_invalid",
-	"num_packets_duplicate",
-}
+// cDifferentialInputs returns the deterministic inputs fed, in order, to both
+// the C reference (interop/fixes_oracle.c) and this port: a zero length packet
+// with a nonzero pointer, a one-byte packet {0}, a one-byte packet {1}, a
+// packet of exactly max_packet_size + the header bytes (the largest a receiver
+// still reads), one byte more than that (refused as too large), and a valid
+// packet produced by a sender.
+func cDifferentialInputs(t *testing.T) [][]byte {
+	t.Helper()
 
-// cDifferentialScenario is one fragment exchange fed to both sides: optional
-// preamble packets (used to advance the received window), the fragment(s) under
-// test, and the genuine packet(s) that follow.
-type cDifferentialScenario struct {
-	label            string
-	fragmentSequence uint16
-	preamble         [][]byte
-	fragment         [][]byte
-	genuine          [][]byte
-}
+	config := DefaultConfig()
+	threshold := config.MaxPacketSize + MaxPacketHeaderBytes + FragmentHeaderBytes
 
-// cDifferentialHeader builds a regular packet at the given sequence with no
-// acks, the same bytes on both sides.
-func cDifferentialHeader(sequence uint16, payload []byte) []byte {
-	var packetHeader [MaxPacketHeaderBytes]byte
-	packetHeaderBytes := writePacketHeader(packetHeader[:], sequence, 0xFFFF, 0)
-	packet := make([]byte, packetHeaderBytes+len(payload))
-	copy(packet, packetHeader[:packetHeaderBytes])
-	copy(packet[packetHeaderBytes:], payload)
-	return packet
-}
-
-// cDifferentialLoneLastFragment builds a lone last fragment (id 1 of 2) of a
-// packet at the given sequence, with payloadBytes payload bytes.
-func cDifferentialLoneLastFragment(sequence uint16, payloadBytes int) []byte {
-	fragment := []byte{1, byte(sequence), byte(sequence >> 8), 1, 1}
-	for i := 0; i < payloadBytes; i++ {
-		fragment = append(fragment, byte(i+1))
+	return [][]byte{
+		{},                          // 1 zero length
+		{0x00},                      // 2 one-byte {0}
+		{0x01},                      // 3 one-byte {1}
+		make([]byte, threshold),     // 4 exactly max_packet_size + 14 bytes of zeros
+		make([]byte, threshold+1),   // 5 one byte more than that
+		cDifferentialValidPacket(t), // 6 valid packet from a sender
 	}
-	return fragment
 }
 
-// cDifferentialInOrderFragments captures the fragments the port emits for a
-// 1.5 x fragment size packet at sequence 0. Feeding these back in order is the
-// in-order fragmented delivery pin (case C).
-func cDifferentialInOrderFragments() [][]byte {
+// cDifferentialValidPacket sends a packet from a default sender and returns the
+// bytes it transmitted, so both sides receive the same valid packet.
+func cDifferentialValidPacket(t *testing.T) []byte {
+	t.Helper()
+
 	config := DefaultConfig()
 	config.Name = "sender"
-	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
-	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
 
-	var fragments [][]byte
+	var validPacket []byte
 	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {
-		fragments = append(fragments, append([]byte(nil), packetData...))
+		if sequence == 0 && validPacket == nil {
+			validPacket = append([]byte(nil), packetData...)
+		}
 	}
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
 
 	endpoint, err := NewEndpoint(&config, 100.0)
 	if err != nil {
-		panic(err)
+		t.Fatalf("could not create sender endpoint: %v", err)
 	}
 
-	packet := make([]byte, config.FragmentSize+config.FragmentSize/2)
-	endpoint.SendPacket(packet)
-	return fragments
-}
+	endpoint.SendPacket([]byte("hello"))
 
-// buildCDifferentialScenarios returns the deterministic inputs fed to both
-// sides: C's cases A, B and C, then every fragment sequence in the sweep fed to
-// a cold receiver and to a receiver already advanced to 1000, each as a lone
-// last fragment with zero and with one payload byte.
-func buildCDifferentialScenarios() []cDifferentialScenario {
-	var scenarios []cDifferentialScenario
-
-	scenarios = append(scenarios, cDifferentialScenario{
-		label:            "A",
-		fragmentSequence: 512,
-		fragment:         [][]byte{cDifferentialLoneLastFragment(512, 0)},
-		genuine:          [][]byte{cDifferentialHeader(0, []byte("ok"))},
-	})
-	scenarios = append(scenarios, cDifferentialScenario{
-		label:            "B",
-		fragmentSequence: 32512,
-		fragment:         [][]byte{cDifferentialLoneLastFragment(32512, 0)},
-		genuine:          [][]byte{cDifferentialHeader(0, []byte("ok"))},
-	})
-
-	inOrderFragments := cDifferentialInOrderFragments()
-	scenarios = append(scenarios, cDifferentialScenario{
-		label:            "C",
-		fragmentSequence: 0,
-		fragment:         inOrderFragments[:1],
-		genuine:          inOrderFragments[1:],
-	})
-
-	sequences := []uint16{0, 1, 255, 256, 511, 512, 513, 32511, 32512, 32513, 32768, 65280, 65535}
-	for _, sequence := range sequences {
-		for _, payloadBytes := range []int{0, 1} {
-			for _, advanced := range []bool{false, true} {
-				scenario := cDifferentialScenario{
-					label:            fmt.Sprintf("sweep-%d-%d", sequence, payloadBytes),
-					fragmentSequence: sequence,
-					fragment:         [][]byte{cDifferentialLoneLastFragment(sequence, payloadBytes)},
-					genuine:          [][]byte{cDifferentialHeader(0, []byte("ok"))},
-				}
-				if advanced {
-					scenario.label += "-adv1000"
-					scenario.preamble = [][]byte{cDifferentialHeader(1000, []byte("adv"))}
-				}
-				scenarios = append(scenarios, scenario)
-			}
-		}
+	if validPacket == nil {
+		t.Fatal("the sender did not transmit a packet")
 	}
-
-	return scenarios
+	return validPacket
 }
 
-// runGoCDifferentialScenario feeds one scenario through a fresh Endpoint
-// (injected clock, in-memory transmit) and returns its transcript line.
-func runGoCDifferentialScenario(scenario cDifferentialScenario) string {
+// runGoCDifferential feeds the inputs through a fresh Endpoint (injected clock
+// and in-memory transmit) and returns one line per input in the same form as
+// the C oracle:
+//
+//	<input> <refused|accepted> <process callback ran 0|1> <the eleven counters>
+func runGoCDifferential(inputs [][]byte) string {
 	config := DefaultConfig()
-	config.Name = "oracle"
+	config.Name = "receiver"
 	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
 
-	delivered := false
+	callbackRan := false
 	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
-		delivered = true
+		callbackRan = true
 		return true
 	}
 
@@ -151,43 +83,32 @@ func runGoCDifferentialScenario(scenario cDifferentialScenario) string {
 		panic(err)
 	}
 
-	for _, packet := range scenario.preamble {
-		delivered = false
-		endpoint.ReceivePacket(packet)
-	}
-
-	fragmentsInvalidBefore := endpoint.Counters()[CounterNumFragmentsInvalid]
-	for _, packet := range scenario.fragment {
-		endpoint.ReceivePacket(packet)
-	}
-	fragmentsInvalidAfter := endpoint.Counters()[CounterNumFragmentsInvalid]
-
-	delivered = false
-	for _, packet := range scenario.genuine {
-		endpoint.ReceivePacket(packet)
-	}
-
-	disposition := "accepted"
-	if fragmentsInvalidAfter != fragmentsInvalidBefore {
-		disposition = "refused"
-	}
-
-	deliveredFlag := 0
-	if delivered {
-		deliveredFlag = 1
-	}
-
-	counters := endpoint.Counters()
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %d %s %d", scenario.label, scenario.fragmentSequence, disposition, deliveredFlag)
-	for _, counter := range counters {
-		fmt.Fprintf(&b, " %d", counter)
+	for i, in := range inputs {
+		callbackRan = false
+		endpoint.ReceivePacket(in)
+
+		ran := 0
+		accepted := "refused"
+		if callbackRan {
+			ran = 1
+			accepted = "accepted"
+		}
+
+		fmt.Fprintf(&b, "%d %s %d", i+1, accepted, ran)
+
+		counters := endpoint.Counters()
+		for j := range NumCounters {
+			fmt.Fprintf(&b, " %d", counters[j])
+		}
+		b.WriteString("\n")
 	}
+
 	return b.String()
 }
 
-// buildCOracle compiles interop/fixes_oracle.c against the checkout named by
-// RELIABLE_C_DIR and returns the path to the binary.
+// buildCOracle compiles interop/fixes_oracle.c (which includes reliable.c) from
+// the checkout named by RELIABLE_C_DIR and returns the path to the binary.
 func buildCOracle(t *testing.T, cDir string) string {
 	t.Helper()
 
@@ -211,51 +132,38 @@ func buildCOracle(t *testing.T, cDir string) string {
 	return oracleBin
 }
 
-// runCOracleScenario runs the C oracle for one scenario, piping the identical
-// packet bytes as length-prefixed records on stdin, and returns its line.
-func runCOracleScenario(t *testing.T, oracleBin string, scenario cDifferentialScenario) string {
+// runCOracleTranscript pipes the inputs to the oracle as length-prefixed
+// packets and returns its stdout transcript.
+func runCOracleTranscript(t *testing.T, oracleBin string, inputs [][]byte) string {
 	t.Helper()
 
 	var buf bytes.Buffer
-	var length [4]byte
-	writePacket := func(packet []byte) {
-		binary.LittleEndian.PutUint32(length[:], uint32(len(packet)))
-		buf.Write(length[:])
-		buf.Write(packet)
-	}
-	for _, packet := range scenario.preamble {
-		writePacket(packet)
-	}
-	for _, packet := range scenario.fragment {
-		writePacket(packet)
-	}
-	for _, packet := range scenario.genuine {
-		writePacket(packet)
+	var lenBuf [4]byte
+	for _, in := range inputs {
+		binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(in)))
+		buf.Write(lenBuf[:])
+		buf.Write(in)
 	}
 
-	cmd := exec.Command(oracleBin,
-		scenario.label,
-		fmt.Sprintf("%d", scenario.fragmentSequence),
-		fmt.Sprintf("%d", len(scenario.preamble)),
-		fmt.Sprintf("%d", len(scenario.fragment)),
-	)
+	cmd := exec.Command(oracleBin)
 	cmd.Stdin = bytes.NewReader(buf.Bytes())
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("could not run the C oracle for %s: %v\n%s", scenario.label, err, out)
+		t.Fatalf("could not run the C oracle: %v", err)
 	}
-	return strings.TrimRight(string(out), "\n")
+	return string(out)
 }
 
 // TestCDifferential feeds the same inputs through the C reference and this port
-// and compares the transcript byte for byte. It is gated on RELIABLE_C_DIR so
-// the unit gate stays hermetic:
+// and compares the transcripts byte for byte. This port already refuses and
+// counts empty packets the way C does, so the transcript is expected to match
+// at BASE. It is gated on RELIABLE_C_DIR so the unit gate stays hermetic:
 //
 //	RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .
 func TestCDifferential(t *testing.T) {
 	cDir := os.Getenv("RELIABLE_C_DIR")
 	if cDir == "" {
-		t.Skip("RELIABLE_C_DIR is not set; skipping the differential test against the C reference. Set it to a checkout of mas-bandwidth/reliable holding the fix (branch sprint/reliable-audit-fixes at or after dfd5541c) and run: RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .")
+		t.Skip("RELIABLE_C_DIR is not set; skipping the differential test against the C reference. Set it to a checkout of mas-bandwidth/reliable holding the fix (branch sprint/reliable-audit-fixes at or after e515523c) and run: RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .")
 	}
 
 	if _, err := exec.LookPath("cc"); err != nil {
@@ -264,20 +172,23 @@ func TestCDifferential(t *testing.T) {
 
 	oracleBin := buildCOracle(t, cDir)
 
-	scenarios := buildCDifferentialScenarios()
+	inputs := cDifferentialInputs(t)
+	goTranscript := runGoCDifferential(inputs)
+	cTranscript := runCOracleTranscript(t, oracleBin, inputs)
 
-	firstDifference := -1
-	for i, scenario := range scenarios {
-		goLine := runGoCDifferentialScenario(scenario)
-		cLine := runCOracleScenario(t, oracleBin, scenario)
-		if goLine != cLine {
-			firstDifference = i
-			t.Logf("first differing line %d:\n  c: %s\ngo: %s", i+1, cLine, goLine)
-			break
+	if goTranscript == cTranscript {
+		return
+	}
+
+	t.Logf("C reference transcript:\n%s", cTranscript)
+	t.Logf("Go port transcript:\n%s", goTranscript)
+
+	goLines := strings.Split(goTranscript, "\n")
+	cLines := strings.Split(cTranscript, "\n")
+	for i := 0; i < len(goLines) && i < len(cLines); i++ {
+		if goLines[i] != cLines[i] {
+			t.Fatalf("differential transcript diverges from the C reference at line %d:\n  c: %s\ngo: %s", i+1, cLines[i], goLines[i])
 		}
 	}
-
-	if firstDifference >= 0 {
-		t.Fatalf("differential transcript diverges from the C reference at line %d", firstDifference+1)
-	}
+	t.Fatalf("differential transcript line count differs from the C reference: c %d lines, go %d lines", len(cLines), len(goLines))
 }

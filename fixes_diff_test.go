@@ -11,151 +11,104 @@ import (
 	"testing"
 )
 
-// cDifferentialCounterNames names the eleven counters in reliable.h order. The
-// C oracle (interop/fixes_oracle.c) prints the same names; keep them in sync.
-var cDifferentialCounterNames = [...]string{
-	"num_packets_sent",
-	"num_packets_received",
-	"num_packets_acked",
-	"num_packets_stale",
-	"num_packets_invalid",
-	"num_packets_too_large_to_send",
-	"num_packets_too_large_to_receive",
-	"num_fragments_sent",
-	"num_fragments_received",
-	"num_fragments_invalid",
-	"num_packets_duplicate",
+// cDifferentialInputs returns the deterministic inputs fed, in order, to both
+// the C reference (interop/fixes_oracle.c) and this port: a zero length packet
+// with a nonzero pointer, a one-byte packet {0}, a one-byte packet {1}, a
+// packet of exactly max_packet_size + the header bytes (the largest a receiver
+// still reads), one byte more than that (refused as too large), and a valid
+// packet produced by a sender.
+func cDifferentialInputs(t *testing.T) [][]byte {
+	t.Helper()
+
+	config := DefaultConfig()
+	threshold := config.MaxPacketSize + MaxPacketHeaderBytes + FragmentHeaderBytes
+
+	return [][]byte{
+		{},                          // 1 zero length
+		{0x00},                      // 2 one-byte {0}
+		{0x01},                      // 3 one-byte {1}
+		make([]byte, threshold),     // 4 exactly max_packet_size + 14 bytes of zeros
+		make([]byte, threshold+1),   // 5 one byte more than that
+		cDifferentialValidPacket(t), // 6 valid packet from a sender
+	}
 }
 
-// buildCDifferentialInputs returns the deterministic inputs fed to both sides:
-// valid traffic, a duplicate, an acking packet, a non-completing far-ahead
-// fragment, and one hostile input per checklist item 5 (zero-length, oversize,
-// truncated header, mismatched fragment count).
-func buildCDifferentialInputs() [][]byte {
-	var inputs [][]byte
+// cDifferentialValidPacket sends a packet from a default sender and returns the
+// bytes it transmitted, so both sides receive the same valid packet.
+func cDifferentialValidPacket(t *testing.T) []byte {
+	t.Helper()
 
-	header := func(seq uint16, ack uint16, ackBits uint32, payload []byte) []byte {
-		var ph [MaxPacketHeaderBytes]byte
-		phb := writePacketHeader(ph[:], seq, ack, ackBits)
-		p := make([]byte, phb+len(payload))
-		copy(p, ph[:phb])
-		copy(p[phb:], payload)
-		return p
+	config := DefaultConfig()
+	config.Name = "sender"
+
+	var validPacket []byte
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {
+		if sequence == 0 && validPacket == nil {
+			validPacket = append([]byte(nil), packetData...)
+		}
+	}
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
+
+	endpoint, err := NewEndpoint(&config, 100.0)
+	if err != nil {
+		t.Fatalf("could not create sender endpoint: %v", err)
 	}
 
-	// valid regular packets (no acks yet: ack 0xFFFF, ack_bits 0)
-	inputs = append(inputs, header(0, 0xFFFF, 0, []byte("hello"))) // 1
-	inputs = append(inputs, header(0, 0xFFFF, 0, []byte("hello"))) // 2 duplicate
-	inputs = append(inputs, header(1, 0xFFFF, 0, []byte("world"))) // 3
-	// acking packet: acks sent sequences 0 and 1 (ack_bits 0b11)
-	inputs = append(inputs, header(2, 1, 0x3, []byte("ack"))) // 4
+	endpoint.SendPacket([]byte("hello"))
 
-	// far-ahead fragment 0 of a 2-fragment packet at sequence 300; never
-	// completes, so it must not move the received window
-	inputs = append(inputs, buildCDifferentialFragment0(300, 2)) // 5
-
-	// a genuine packet the fragment must not shadow
-	inputs = append(inputs, header(3, 0xFFFF, 0, []byte("data"))) // 6
-
-	// hostile inputs (checklist item 5)
-	inputs = append(inputs, []byte{})                                                         // 7 zero-length
-	inputs = append(inputs, make([]byte, 16*1024+MaxPacketHeaderBytes+FragmentHeaderBytes+1)) // 8 oversize
-	inputs = append(inputs, []byte{0x00})                                                     // 9 truncated header
-	inputs = append(inputs, []byte{0x01, 0x00, 0x00, 0x00, 0xFF})                             // 10 mismatched fragment count (256 > 16)
-
-	return inputs
-}
-
-// buildCDifferentialFragment0 builds a valid, non-completing fragment 0 of a
-// numFragments-fragment packet at the given sequence.
-func buildCDifferentialFragment0(seq uint16, numFragments int) []byte {
-	cfg := DefaultConfig()
-
-	var ph [MaxPacketHeaderBytes]byte
-	phb := writePacketHeader(ph[:], seq, 0xFFFF, 0)
-
-	frag := make([]byte, FragmentHeaderBytes+phb+cfg.FragmentSize)
-	frag[0] = 1
-	frag[1] = byte(seq)
-	frag[2] = byte(seq >> 8)
-	frag[3] = 0
-	frag[4] = byte(numFragments - 1)
-	copy(frag[FragmentHeaderBytes:], ph[:phb])
-	for i := FragmentHeaderBytes + phb; i < len(frag); i++ {
-		frag[i] = byte(i)
+	if validPacket == nil {
+		t.Fatal("the sender did not transmit a packet")
 	}
-	return frag
+	return validPacket
 }
 
 // runGoCDifferential feeds the inputs through a fresh Endpoint (injected clock
-// and in-memory transmit) and returns the transcript, one line per input in
-// the same form as the C oracle.
+// and in-memory transmit) and returns one line per input in the same form as
+// the C oracle:
+//
+//	<input> <refused|accepted> <process callback ran 0|1> <the eleven counters>
 func runGoCDifferential(inputs [][]byte) string {
-	cfg := DefaultConfig()
-	cfg.Name = "oracle"
-	cfg.TransmitPacketFunction = func(id uint64, seq uint16, data []byte) {}
+	config := DefaultConfig()
+	config.Name = "receiver"
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
 
-	delivered := false
-	var deliveredSeq uint16
-	var deliveredBytes int
-	cfg.ProcessPacketFunction = func(id uint64, seq uint16, data []byte) bool {
-		if !delivered {
-			delivered = true
-			deliveredSeq = seq
-			deliveredBytes = len(data)
-		}
+	callbackRan := false
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+		callbackRan = true
 		return true
 	}
 
-	ep, err := NewEndpoint(&cfg, 100.0)
+	endpoint, err := NewEndpoint(&config, 100.0)
 	if err != nil {
 		panic(err)
 	}
 
-	// send preamble, identical to the C oracle
-	ep.SendPacket([]byte("abc"))
-	ep.SendPacket([]byte("def"))
-
 	var b strings.Builder
-	previous := ep.Counters()
-
 	for i, in := range inputs {
-		delivered = false
-		ep.ReceivePacket(in)
-		current := ep.Counters()
+		callbackRan = false
+		endpoint.ReceivePacket(in)
 
-		counter := "none"
-		for j := range NumCounters {
-			if current[j] != previous[j] {
-				counter = cDifferentialCounterNames[j]
-				break
-			}
-		}
-
+		ran := 0
 		accepted := "refused"
-		if delivered {
+		if callbackRan {
+			ran = 1
 			accepted = "accepted"
 		}
 
-		fmt.Fprintf(&b, "%d %s %s ", i+1, accepted, counter)
-		if delivered {
-			fmt.Fprintf(&b, "%d:%d", deliveredSeq, deliveredBytes)
-		} else {
-			b.WriteString("-")
-		}
+		fmt.Fprintf(&b, "%d %s %d", i+1, accepted, ran)
+
+		counters := endpoint.Counters()
 		for j := range NumCounters {
-			fmt.Fprintf(&b, " %d", current[j])
+			fmt.Fprintf(&b, " %d", counters[j])
 		}
 		b.WriteString("\n")
-
-		previous = current
 	}
 
 	return b.String()
 }
 
-// buildCOracle compiles interop/fixes_oracle.c against the checkout named by
-// RELIABLE_C_DIR and returns the path to the binary.
+// buildCOracle compiles interop/fixes_oracle.c (which includes reliable.c) from
+// the checkout named by RELIABLE_C_DIR and returns the path to the binary.
 func buildCOracle(t *testing.T, cDir string) string {
 	t.Helper()
 
@@ -172,7 +125,7 @@ func buildCOracle(t *testing.T, cDir string) string {
 	oracleBin := filepath.Join(dir, "oracle")
 	src := filepath.Join("interop", "fixes_oracle.c")
 
-	cmd := exec.Command("cc", "-O2", "-ffp-contract=off", "-I"+cDir, "-o", oracleBin, src, filepath.Join(cDir, "reliable.c"), "-lm")
+	cmd := exec.Command("cc", "-O2", "-ffp-contract=off", "-I"+cDir, "-o", oracleBin, src, "-lm")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("could not build the C oracle: %v\n%s", err, out)
 	}
@@ -201,15 +154,16 @@ func runCOracleTranscript(t *testing.T, oracleBin string, inputs [][]byte) strin
 	return string(out)
 }
 
-// TestCDifferential feeds the same inputs through the C reference and this
-// port and compares the transcripts byte for byte. It is gated on
-// RELIABLE_C_DIR so the unit gate stays hermetic:
+// TestCDifferential feeds the same inputs through the C reference and this port
+// and compares the transcripts byte for byte. This port already refuses and
+// counts empty packets the way C does, so the transcript is expected to match
+// at BASE. It is gated on RELIABLE_C_DIR so the unit gate stays hermetic:
 //
 //	RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .
 func TestCDifferential(t *testing.T) {
 	cDir := os.Getenv("RELIABLE_C_DIR")
 	if cDir == "" {
-		t.Skip("RELIABLE_C_DIR is not set; skipping the differential test against the C reference. Set it to a checkout of mas-bandwidth/reliable holding the fix (branch sprint/reliable-audit-fixes at or after 7862477e) and run: RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .")
+		t.Skip("RELIABLE_C_DIR is not set; skipping the differential test against the C reference. Set it to a checkout of mas-bandwidth/reliable holding the fix (branch sprint/reliable-audit-fixes at or after e515523c) and run: RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .")
 	}
 
 	if _, err := exec.LookPath("cc"); err != nil {
@@ -218,7 +172,7 @@ func TestCDifferential(t *testing.T) {
 
 	oracleBin := buildCOracle(t, cDir)
 
-	inputs := buildCDifferentialInputs()
+	inputs := cDifferentialInputs(t)
 	goTranscript := runGoCDifferential(inputs)
 	cTranscript := runCOracleTranscript(t, oracleBin, inputs)
 

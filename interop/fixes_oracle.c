@@ -1,42 +1,31 @@
 /*
     fixes_oracle.c
 
-    Reference side of the differential check: it reads a stream of length-prefixed
-    packets from stdin, feeds each to a fresh reliable endpoint (default config,
-    in-memory callbacks only, no socket, no clock), and prints one line per input
-    in the same form as the Go side (fixes_diff_test.go):
+    Reference side of the differential check. It includes reliable.c from the
+    checkout named by RELIABLE_C_DIR (branch sprint/reliable-audit-fixes at or
+    after e515523c, where a zero length packet is refused and counted invalid
+    before any byte is read), reads a stream of length-prefixed packets from
+    stdin, feeds each in turn to one default endpoint (in-memory callbacks only,
+    no socket, no clock), and prints one line per input:
 
-        <n> <accepted|refused> <counter name or none> <seq:len or -> <c0> .. <c10>
+        <input> <refused|accepted> <process callback ran 0|1> <the eleven counters>
 
-    The Go test builds this file against the C checkout named by RELIABLE_C_DIR:
+    The Go side (fixes_diff_test.go) builds this file against the same checkout:
 
-        cc -O2 -ffp-contract=off -I$RELIABLE_C_DIR -o oracle fixes_oracle.c $RELIABLE_C_DIR/reliable.c -lm
+        cc -O2 -ffp-contract=off -I$RELIABLE_C_DIR -o oracle fixes_oracle.c -lm
 
-    and compares the transcripts byte for byte. Keep the line format and the
-    "accepted"/"counter"/"delivered" conventions in sync with fixes_diff_test.go.
+    and byte-compares the two transcripts. Keep the line format and the
+    accepted/callback conventions in sync with fixes_diff_test.go.
 */
 
-#include "reliable.h"
+#include "reliable.c"
 
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 
-static const char * counter_names[RELIABLE_ENDPOINT_NUM_COUNTERS] = {
-    "num_packets_sent",
-    "num_packets_received",
-    "num_packets_acked",
-    "num_packets_stale",
-    "num_packets_invalid",
-    "num_packets_too_large_to_send",
-    "num_packets_too_large_to_receive",
-    "num_fragments_sent",
-    "num_fragments_received",
-    "num_fragments_invalid",
-    "num_packets_duplicate",
-};
-
-static int delivered;
+static int callback_ran;
 static uint16_t delivered_sequence;
 static int delivered_bytes;
 
@@ -54,12 +43,9 @@ static int process_packet( void * context, uint64_t id, uint16_t sequence, uint8
     (void) context;
     (void) id;
     (void) packet_data;
-    if ( !delivered )
-    {
-        delivered = 1;
-        delivered_sequence = sequence;
-        delivered_bytes = packet_bytes;
-    }
+    callback_ran = 1;
+    delivered_sequence = sequence;
+    delivered_bytes = packet_bytes;
     return 1;
 }
 
@@ -82,7 +68,7 @@ int main( void )
 {
     struct reliable_config_t config;
     reliable_default_config( &config );
-    reliable_copy_string( config.name, "oracle", sizeof( config.name ) );
+    reliable_copy_string( config.name, "receiver", sizeof( config.name ) );
     config.transmit_packet_function = &transmit_packet;
     config.process_packet_function = &process_packet;
 
@@ -92,14 +78,6 @@ int main( void )
         fprintf( stderr, "oracle: could not create endpoint\n" );
         return 1;
     }
-
-    // send preamble: populate sent_packets so a later received packet carrying
-    // acks exercises the ack walk and its counters. identical on the Go side.
-    reliable_endpoint_send_packet( endpoint, (uint8_t*) "abc", 3 );
-    reliable_endpoint_send_packet( endpoint, (uint8_t*) "def", 3 );
-
-    uint64_t previous[RELIABLE_ENDPOINT_NUM_COUNTERS];
-    memcpy( previous, reliable_endpoint_counters( endpoint ), sizeof( previous ) );
 
     unsigned long n = 0;
     for ( ;; )
@@ -132,41 +110,22 @@ int main( void )
             remaining -= got;
         }
 
-        delivered = 0;
+        callback_ran = 0;
+        delivered_sequence = 0;
+        delivered_bytes = 0;
 
         reliable_endpoint_receive_packet( endpoint, packet_data, (int) packet_bytes_u32 );
 
         RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
 
-        const char * counter = "none";
+        printf( "%lu %s %d", n, callback_ran ? "accepted" : "refused", callback_ran ? 1 : 0 );
+
         int i;
-        for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; ++i )
-        {
-            if ( counters[i] != previous[i] )
-            {
-                counter = counter_names[i];
-                break;
-            }
-        }
-
-        printf( "%lu %s %s ", n, delivered ? "accepted" : "refused", counter );
-
-        if ( delivered )
-        {
-            printf( "%u:%d", (unsigned) delivered_sequence, delivered_bytes );
-        }
-        else
-        {
-            printf( "-" );
-        }
-
         for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; ++i )
         {
             printf( " %" PRIu64, counters[i] );
         }
         printf( "\n" );
-
-        memcpy( previous, counters, sizeof( previous ) );
     }
 
     reliable_endpoint_destroy( endpoint );

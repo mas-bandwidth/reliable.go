@@ -27,130 +27,162 @@ var cDifferentialCounterNames = [...]string{
 	"num_packets_duplicate",
 }
 
-// buildCDifferentialInputs returns the deterministic inputs fed to both sides:
-// valid traffic, a duplicate, an acking packet, a non-completing far-ahead
-// fragment, and one hostile input per checklist item 5 (zero-length, oversize,
-// truncated header, mismatched fragment count).
-func buildCDifferentialInputs() [][]byte {
-	var inputs [][]byte
-
-	header := func(seq uint16, ack uint16, ackBits uint32, payload []byte) []byte {
-		var ph [MaxPacketHeaderBytes]byte
-		phb := writePacketHeader(ph[:], seq, ack, ackBits)
-		p := make([]byte, phb+len(payload))
-		copy(p, ph[:phb])
-		copy(p[phb:], payload)
-		return p
-	}
-
-	// valid regular packets (no acks yet: ack 0xFFFF, ack_bits 0)
-	inputs = append(inputs, header(0, 0xFFFF, 0, []byte("hello"))) // 1
-	inputs = append(inputs, header(0, 0xFFFF, 0, []byte("hello"))) // 2 duplicate
-	inputs = append(inputs, header(1, 0xFFFF, 0, []byte("world"))) // 3
-	// acking packet: acks sent sequences 0 and 1 (ack_bits 0b11)
-	inputs = append(inputs, header(2, 1, 0x3, []byte("ack"))) // 4
-
-	// far-ahead fragment 0 of a 2-fragment packet at sequence 300; never
-	// completes, so it must not move the received window
-	inputs = append(inputs, buildCDifferentialFragment0(300, 2)) // 5
-
-	// a genuine packet the fragment must not shadow
-	inputs = append(inputs, header(3, 0xFFFF, 0, []byte("data"))) // 6
-
-	// hostile inputs (checklist item 5)
-	inputs = append(inputs, []byte{})                                                         // 7 zero-length
-	inputs = append(inputs, make([]byte, 16*1024+MaxPacketHeaderBytes+FragmentHeaderBytes+1)) // 8 oversize
-	inputs = append(inputs, []byte{0x00})                                                     // 9 truncated header
-	inputs = append(inputs, []byte{0x01, 0x00, 0x00, 0x00, 0xFF})                             // 10 mismatched fragment count (256 > 16)
-
-	return inputs
+// cDifferentialScenario is one fragment exchange fed to both sides: optional
+// preamble packets (used to advance the received window), the fragment(s) under
+// test, and the genuine packet(s) that follow.
+type cDifferentialScenario struct {
+	label            string
+	fragmentSequence uint16
+	preamble         [][]byte
+	fragment         [][]byte
+	genuine          [][]byte
 }
 
-// buildCDifferentialFragment0 builds a valid, non-completing fragment 0 of a
-// numFragments-fragment packet at the given sequence.
-func buildCDifferentialFragment0(seq uint16, numFragments int) []byte {
-	cfg := DefaultConfig()
-
-	var ph [MaxPacketHeaderBytes]byte
-	phb := writePacketHeader(ph[:], seq, 0xFFFF, 0)
-
-	frag := make([]byte, FragmentHeaderBytes+phb+cfg.FragmentSize)
-	frag[0] = 1
-	frag[1] = byte(seq)
-	frag[2] = byte(seq >> 8)
-	frag[3] = 0
-	frag[4] = byte(numFragments - 1)
-	copy(frag[FragmentHeaderBytes:], ph[:phb])
-	for i := FragmentHeaderBytes + phb; i < len(frag); i++ {
-		frag[i] = byte(i)
-	}
-	return frag
+// cDifferentialHeader builds a regular packet at the given sequence with no
+// acks, the same bytes on both sides.
+func cDifferentialHeader(sequence uint16, payload []byte) []byte {
+	var packetHeader [MaxPacketHeaderBytes]byte
+	packetHeaderBytes := writePacketHeader(packetHeader[:], sequence, 0xFFFF, 0)
+	packet := make([]byte, packetHeaderBytes+len(payload))
+	copy(packet, packetHeader[:packetHeaderBytes])
+	copy(packet[packetHeaderBytes:], payload)
+	return packet
 }
 
-// runGoCDifferential feeds the inputs through a fresh Endpoint (injected clock
-// and in-memory transmit) and returns the transcript, one line per input in
-// the same form as the C oracle.
-func runGoCDifferential(inputs [][]byte) string {
-	cfg := DefaultConfig()
-	cfg.Name = "oracle"
-	cfg.TransmitPacketFunction = func(id uint64, seq uint16, data []byte) {}
+// cDifferentialLoneLastFragment builds a lone last fragment (id 1 of 2) of a
+// packet at the given sequence, with payloadBytes payload bytes.
+func cDifferentialLoneLastFragment(sequence uint16, payloadBytes int) []byte {
+	fragment := []byte{1, byte(sequence), byte(sequence >> 8), 1, 1}
+	for i := 0; i < payloadBytes; i++ {
+		fragment = append(fragment, byte(i+1))
+	}
+	return fragment
+}
 
-	delivered := false
-	var deliveredSeq uint16
-	var deliveredBytes int
-	cfg.ProcessPacketFunction = func(id uint64, seq uint16, data []byte) bool {
-		if !delivered {
-			delivered = true
-			deliveredSeq = seq
-			deliveredBytes = len(data)
-		}
-		return true
+// cDifferentialInOrderFragments captures the fragments the port emits for a
+// 1.5 x fragment size packet at sequence 0. Feeding these back in order is the
+// in-order fragmented delivery pin (case C).
+func cDifferentialInOrderFragments() [][]byte {
+	config := DefaultConfig()
+	config.Name = "sender"
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool { return true }
+
+	var fragments [][]byte
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {
+		fragments = append(fragments, append([]byte(nil), packetData...))
 	}
 
-	ep, err := NewEndpoint(&cfg, 100.0)
+	endpoint, err := NewEndpoint(&config, 100.0)
 	if err != nil {
 		panic(err)
 	}
 
-	// send preamble, identical to the C oracle
-	ep.SendPacket([]byte("abc"))
-	ep.SendPacket([]byte("def"))
+	packet := make([]byte, config.FragmentSize+config.FragmentSize/2)
+	endpoint.SendPacket(packet)
+	return fragments
+}
 
-	var b strings.Builder
-	previous := ep.Counters()
+// buildCDifferentialScenarios returns the deterministic inputs fed to both
+// sides: C's cases A, B and C, then every fragment sequence in the sweep fed to
+// a cold receiver and to a receiver already advanced to 1000, each as a lone
+// last fragment with zero and with one payload byte.
+func buildCDifferentialScenarios() []cDifferentialScenario {
+	var scenarios []cDifferentialScenario
 
-	for i, in := range inputs {
-		delivered = false
-		ep.ReceivePacket(in)
-		current := ep.Counters()
+	scenarios = append(scenarios, cDifferentialScenario{
+		label:            "A",
+		fragmentSequence: 512,
+		fragment:         [][]byte{cDifferentialLoneLastFragment(512, 0)},
+		genuine:          [][]byte{cDifferentialHeader(0, []byte("ok"))},
+	})
+	scenarios = append(scenarios, cDifferentialScenario{
+		label:            "B",
+		fragmentSequence: 32512,
+		fragment:         [][]byte{cDifferentialLoneLastFragment(32512, 0)},
+		genuine:          [][]byte{cDifferentialHeader(0, []byte("ok"))},
+	})
 
-		counter := "none"
-		for j := range NumCounters {
-			if current[j] != previous[j] {
-				counter = cDifferentialCounterNames[j]
-				break
+	inOrderFragments := cDifferentialInOrderFragments()
+	scenarios = append(scenarios, cDifferentialScenario{
+		label:            "C",
+		fragmentSequence: 0,
+		fragment:         inOrderFragments[:1],
+		genuine:          inOrderFragments[1:],
+	})
+
+	sequences := []uint16{0, 1, 255, 256, 511, 512, 513, 32511, 32512, 32513, 32768, 65280, 65535}
+	for _, sequence := range sequences {
+		for _, payloadBytes := range []int{0, 1} {
+			for _, advanced := range []bool{false, true} {
+				scenario := cDifferentialScenario{
+					label:            fmt.Sprintf("sweep-%d-%d", sequence, payloadBytes),
+					fragmentSequence: sequence,
+					fragment:         [][]byte{cDifferentialLoneLastFragment(sequence, payloadBytes)},
+					genuine:          [][]byte{cDifferentialHeader(0, []byte("ok"))},
+				}
+				if advanced {
+					scenario.label += "-adv1000"
+					scenario.preamble = [][]byte{cDifferentialHeader(1000, []byte("adv"))}
+				}
+				scenarios = append(scenarios, scenario)
 			}
 		}
-
-		accepted := "refused"
-		if delivered {
-			accepted = "accepted"
-		}
-
-		fmt.Fprintf(&b, "%d %s %s ", i+1, accepted, counter)
-		if delivered {
-			fmt.Fprintf(&b, "%d:%d", deliveredSeq, deliveredBytes)
-		} else {
-			b.WriteString("-")
-		}
-		for j := range NumCounters {
-			fmt.Fprintf(&b, " %d", current[j])
-		}
-		b.WriteString("\n")
-
-		previous = current
 	}
 
+	return scenarios
+}
+
+// runGoCDifferentialScenario feeds one scenario through a fresh Endpoint
+// (injected clock, in-memory transmit) and returns its transcript line.
+func runGoCDifferentialScenario(scenario cDifferentialScenario) string {
+	config := DefaultConfig()
+	config.Name = "oracle"
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
+
+	delivered := false
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+		delivered = true
+		return true
+	}
+
+	endpoint, err := NewEndpoint(&config, 100.0)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, packet := range scenario.preamble {
+		delivered = false
+		endpoint.ReceivePacket(packet)
+	}
+
+	fragmentsInvalidBefore := endpoint.Counters()[CounterNumFragmentsInvalid]
+	for _, packet := range scenario.fragment {
+		endpoint.ReceivePacket(packet)
+	}
+	fragmentsInvalidAfter := endpoint.Counters()[CounterNumFragmentsInvalid]
+
+	delivered = false
+	for _, packet := range scenario.genuine {
+		endpoint.ReceivePacket(packet)
+	}
+
+	disposition := "accepted"
+	if fragmentsInvalidAfter != fragmentsInvalidBefore {
+		disposition = "refused"
+	}
+
+	deliveredFlag := 0
+	if delivered {
+		deliveredFlag = 1
+	}
+
+	counters := endpoint.Counters()
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %d %s %d", scenario.label, scenario.fragmentSequence, disposition, deliveredFlag)
+	for _, counter := range counters {
+		fmt.Fprintf(&b, " %d", counter)
+	}
 	return b.String()
 }
 
@@ -172,44 +204,58 @@ func buildCOracle(t *testing.T, cDir string) string {
 	oracleBin := filepath.Join(dir, "oracle")
 	src := filepath.Join("interop", "fixes_oracle.c")
 
-	cmd := exec.Command("cc", "-O2", "-ffp-contract=off", "-I"+cDir, "-o", oracleBin, src, filepath.Join(cDir, "reliable.c"), "-lm")
+	cmd := exec.Command("cc", "-O2", "-ffp-contract=off", "-I"+cDir, "-o", oracleBin, src, "-lm")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("could not build the C oracle: %v\n%s", err, out)
 	}
 	return oracleBin
 }
 
-// runCOracleTranscript pipes the inputs to the oracle as length-prefixed
-// packets and returns its stdout transcript.
-func runCOracleTranscript(t *testing.T, oracleBin string, inputs [][]byte) string {
+// runCOracleScenario runs the C oracle for one scenario, piping the identical
+// packet bytes as length-prefixed records on stdin, and returns its line.
+func runCOracleScenario(t *testing.T, oracleBin string, scenario cDifferentialScenario) string {
 	t.Helper()
 
 	var buf bytes.Buffer
-	var lenBuf [4]byte
-	for _, in := range inputs {
-		binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(in)))
-		buf.Write(lenBuf[:])
-		buf.Write(in)
+	var length [4]byte
+	writePacket := func(packet []byte) {
+		binary.LittleEndian.PutUint32(length[:], uint32(len(packet)))
+		buf.Write(length[:])
+		buf.Write(packet)
+	}
+	for _, packet := range scenario.preamble {
+		writePacket(packet)
+	}
+	for _, packet := range scenario.fragment {
+		writePacket(packet)
+	}
+	for _, packet := range scenario.genuine {
+		writePacket(packet)
 	}
 
-	cmd := exec.Command(oracleBin)
+	cmd := exec.Command(oracleBin,
+		scenario.label,
+		fmt.Sprintf("%d", scenario.fragmentSequence),
+		fmt.Sprintf("%d", len(scenario.preamble)),
+		fmt.Sprintf("%d", len(scenario.fragment)),
+	)
 	cmd.Stdin = bytes.NewReader(buf.Bytes())
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("could not run the C oracle: %v", err)
+		t.Fatalf("could not run the C oracle for %s: %v\n%s", scenario.label, err, out)
 	}
-	return string(out)
+	return strings.TrimRight(string(out), "\n")
 }
 
-// TestCDifferential feeds the same inputs through the C reference and this
-// port and compares the transcripts byte for byte. It is gated on
-// RELIABLE_C_DIR so the unit gate stays hermetic:
+// TestCDifferential feeds the same inputs through the C reference and this port
+// and compares the transcript byte for byte. It is gated on RELIABLE_C_DIR so
+// the unit gate stays hermetic:
 //
 //	RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .
 func TestCDifferential(t *testing.T) {
 	cDir := os.Getenv("RELIABLE_C_DIR")
 	if cDir == "" {
-		t.Skip("RELIABLE_C_DIR is not set; skipping the differential test against the C reference. Set it to a checkout of mas-bandwidth/reliable holding the fix (branch sprint/reliable-audit-fixes at or after 7862477e) and run: RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .")
+		t.Skip("RELIABLE_C_DIR is not set; skipping the differential test against the C reference. Set it to a checkout of mas-bandwidth/reliable holding the fix (branch sprint/reliable-audit-fixes at or after dfd5541c) and run: RELIABLE_C_DIR=<checkout> go test -count=1 -run TestCDifferential .")
 	}
 
 	if _, err := exec.LookPath("cc"); err != nil {
@@ -218,23 +264,20 @@ func TestCDifferential(t *testing.T) {
 
 	oracleBin := buildCOracle(t, cDir)
 
-	inputs := buildCDifferentialInputs()
-	goTranscript := runGoCDifferential(inputs)
-	cTranscript := runCOracleTranscript(t, oracleBin, inputs)
+	scenarios := buildCDifferentialScenarios()
 
-	if goTranscript == cTranscript {
-		return
-	}
-
-	t.Logf("C reference transcript:\n%s", cTranscript)
-	t.Logf("Go port transcript:\n%s", goTranscript)
-
-	goLines := strings.Split(goTranscript, "\n")
-	cLines := strings.Split(cTranscript, "\n")
-	for i := 0; i < len(goLines) && i < len(cLines); i++ {
-		if goLines[i] != cLines[i] {
-			t.Fatalf("differential transcript diverges from the C reference at line %d:\n  c: %s\ngo: %s", i+1, cLines[i], goLines[i])
+	firstDifference := -1
+	for i, scenario := range scenarios {
+		goLine := runGoCDifferentialScenario(scenario)
+		cLine := runCOracleScenario(t, oracleBin, scenario)
+		if goLine != cLine {
+			firstDifference = i
+			t.Logf("first differing line %d:\n  c: %s\ngo: %s", i+1, cLine, goLine)
+			break
 		}
 	}
-	t.Fatalf("differential transcript line count differs from the C reference: c %d lines, go %d lines", len(cLines), len(goLines))
+
+	if firstDifference >= 0 {
+		t.Fatalf("differential transcript diverges from the C reference at line %d", firstDifference+1)
+	}
 }

@@ -1,44 +1,40 @@
 /*
     fixes_oracle.c
 
-    Reference side of the differential check: it reads a stream of length-prefixed
-    packets from stdin, feeds each to a fresh reliable endpoint (default config,
-    in-memory callbacks only, no socket, no clock), and prints one line per input
-    in the same form as the Go side (fixes_diff_test.go):
+    Reference side of the differential check for the fragment window advance fix.
+    It is driven by arguments and stdin bytes:
 
-        <n> <accepted|refused> <counter name or none> <seq:len or -> <c0> .. <c10>
+        oracle <label> <fragment sequence> <num preamble> <num fragment>
 
-    The Go test builds this file against the C checkout named by RELIABLE_C_DIR:
+    and reads length-prefixed packets from stdin in order: the preamble packets,
+    then the fragment packet(s), then the genuine packet(s) as the remaining
+    stream. It feeds them to a fresh reliable endpoint (default config,
+    in-memory callbacks only, no socket, no clock) and prints one line:
 
-        cc -O2 -ffp-contract=off -I$RELIABLE_C_DIR -o oracle fixes_oracle.c $RELIABLE_C_DIR/reliable.c -lm
+        <label> <fragment seq> <refused|accepted> <genuine delivered 0|1> <c0> .. <c10>
 
-    and compares the transcripts byte for byte. Keep the line format and the
-    "accepted"/"counter"/"delivered" conventions in sync with fixes_diff_test.go.
+    The Go side (fixes_diff_test.go) pipes the identical bytes and compares the
+    two transcripts byte for byte. Build against the checkout named by
+    RELIABLE_C_DIR:
+
+        cc -O2 -ffp-contract=off -I$RELIABLE_C_DIR -o oracle fixes_oracle.c -lm
+
+    Keep the line format, the disposition rule and the counter order in sync with
+    fixes_diff_test.go. Include reliable.c so a single translation unit is built.
 */
 
-#include "reliable.h"
+#include "reliable.c"
 
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 
-static const char * counter_names[RELIABLE_ENDPOINT_NUM_COUNTERS] = {
-    "num_packets_sent",
-    "num_packets_received",
-    "num_packets_acked",
-    "num_packets_stale",
-    "num_packets_invalid",
-    "num_packets_too_large_to_send",
-    "num_packets_too_large_to_receive",
-    "num_fragments_sent",
-    "num_fragments_received",
-    "num_fragments_invalid",
-    "num_packets_duplicate",
-};
+/* reliable.h counter order: num_fragments_invalid is index 9. */
+#define COUNTER_NUM_FRAGMENTS_INVALID 9
 
 static int delivered;
-static uint16_t delivered_sequence;
-static int delivered_bytes;
 
 static void transmit_packet( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
 {
@@ -53,13 +49,10 @@ static int process_packet( void * context, uint64_t id, uint16_t sequence, uint8
 {
     (void) context;
     (void) id;
+    (void) sequence;
     (void) packet_data;
-    if ( !delivered )
-    {
-        delivered = 1;
-        delivered_sequence = sequence;
-        delivered_bytes = packet_bytes;
-    }
+    (void) packet_bytes;
+    delivered = 1;
     return 1;
 }
 
@@ -78,8 +71,45 @@ static int read_uint32_le( uint32_t * out )
     return 1;
 }
 
-int main( void )
+/* reads one length-prefixed packet. returns its length, 0 on clean EOF, -1 on a
+   short read. */
+static int read_packet( uint8_t * packet_data, uint32_t capacity )
 {
+    uint32_t packet_bytes;
+    if ( !read_uint32_le( &packet_bytes ) )
+        return 0;
+    if ( packet_bytes > capacity )
+    {
+        fprintf( stderr, "oracle: packet %u too large\n", packet_bytes );
+        return -1;
+    }
+    size_t got = 0;
+    while ( got < packet_bytes )
+    {
+        size_t n = fread( packet_data + got, 1, packet_bytes - got, stdin );
+        if ( n == 0 )
+        {
+            fprintf( stderr, "oracle: unexpected EOF\n" );
+            return -1;
+        }
+        got += n;
+    }
+    return (int) packet_bytes;
+}
+
+int main( int argc, char ** argv )
+{
+    if ( argc < 5 )
+    {
+        fprintf( stderr, "usage: oracle <label> <fragment sequence> <num preamble> <num fragment>\n" );
+        return 1;
+    }
+
+    const char * label = argv[1];
+    unsigned fragment_sequence = (unsigned) strtoul( argv[2], NULL, 10 );
+    int num_preamble = atoi( argv[3] );
+    int num_fragment = atoi( argv[4] );
+
     struct reliable_config_t config;
     reliable_default_config( &config );
     reliable_copy_string( config.name, "oracle", sizeof( config.name ) );
@@ -93,81 +123,60 @@ int main( void )
         return 1;
     }
 
-    // send preamble: populate sent_packets so a later received packet carrying
-    // acks exercises the ack walk and its counters. identical on the Go side.
-    reliable_endpoint_send_packet( endpoint, (uint8_t*) "abc", 3 );
-    reliable_endpoint_send_packet( endpoint, (uint8_t*) "def", 3 );
+    static uint8_t packet_data[1024 * 1024];
 
-    uint64_t previous[RELIABLE_ENDPOINT_NUM_COUNTERS];
-    memcpy( previous, reliable_endpoint_counters( endpoint ), sizeof( previous ) );
-
-    unsigned long n = 0;
-    for ( ;; )
+    int i;
+    for ( i = 0; i < num_preamble; ++i )
     {
-        uint32_t packet_bytes_u32;
-        if ( !read_uint32_le( &packet_bytes_u32 ) )
+        int n = read_packet( packet_data, sizeof( packet_data ) );
+        if ( n <= 0 )
         {
-            break;
-        }
-
-        n++;
-
-        if ( packet_bytes_u32 > 1024 * 1024 )
-        {
-            fprintf( stderr, "oracle: input %lu too large\n", n );
+            fprintf( stderr, "oracle: missing preamble packet\n" );
+            reliable_endpoint_destroy( endpoint );
             return 1;
         }
-
-        static uint8_t packet_data[1024 * 1024];
-
-        size_t remaining = (size_t) packet_bytes_u32;
-        while ( remaining > 0 )
-        {
-            size_t got = fread( packet_data + ( packet_bytes_u32 - remaining ), 1, remaining, stdin );
-            if ( got == 0 )
-            {
-                fprintf( stderr, "oracle: unexpected EOF on input %lu\n", n );
-                return 1;
-            }
-            remaining -= got;
-        }
-
         delivered = 0;
-
-        reliable_endpoint_receive_packet( endpoint, packet_data, (int) packet_bytes_u32 );
-
-        RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
-
-        const char * counter = "none";
-        int i;
-        for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; ++i )
-        {
-            if ( counters[i] != previous[i] )
-            {
-                counter = counter_names[i];
-                break;
-            }
-        }
-
-        printf( "%lu %s %s ", n, delivered ? "accepted" : "refused", counter );
-
-        if ( delivered )
-        {
-            printf( "%u:%d", (unsigned) delivered_sequence, delivered_bytes );
-        }
-        else
-        {
-            printf( "-" );
-        }
-
-        for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; ++i )
-        {
-            printf( " %" PRIu64, counters[i] );
-        }
-        printf( "\n" );
-
-        memcpy( previous, counters, sizeof( previous ) );
+        reliable_endpoint_receive_packet( endpoint, packet_data, n );
     }
+
+    RELIABLE_CONST uint64_t * before = reliable_endpoint_counters( endpoint );
+    uint64_t fragments_invalid_before = before[COUNTER_NUM_FRAGMENTS_INVALID];
+
+    for ( i = 0; i < num_fragment; ++i )
+    {
+        int n = read_packet( packet_data, sizeof( packet_data ) );
+        if ( n <= 0 )
+        {
+            fprintf( stderr, "oracle: missing fragment packet\n" );
+            reliable_endpoint_destroy( endpoint );
+            return 1;
+        }
+        reliable_endpoint_receive_packet( endpoint, packet_data, n );
+    }
+
+    RELIABLE_CONST uint64_t * after = reliable_endpoint_counters( endpoint );
+    const char * disposition = ( after[COUNTER_NUM_FRAGMENTS_INVALID] != fragments_invalid_before ) ? "refused" : "accepted";
+
+    delivered = 0;
+    for ( ;; )
+    {
+        int n = read_packet( packet_data, sizeof( packet_data ) );
+        if ( n == 0 )
+            break;
+        if ( n < 0 )
+        {
+            reliable_endpoint_destroy( endpoint );
+            return 1;
+        }
+        reliable_endpoint_receive_packet( endpoint, packet_data, n );
+    }
+
+    RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+
+    printf( "%s %u %s %d", label, fragment_sequence, disposition, delivered ? 1 : 0 );
+    for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; ++i )
+        printf( " %" PRIu64, counters[i] );
+    printf( "\n" );
 
     reliable_endpoint_destroy( endpoint );
     return 0;

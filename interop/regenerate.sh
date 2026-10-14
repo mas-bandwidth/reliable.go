@@ -21,6 +21,10 @@ set -euo pipefail
 # so receiver acks in this lossy scenario move with the fix and the wire bytes of
 # the transcript legitimately change. C is normative and the golden follows it; the
 # Go port reproduces the post-fix C transcript byte for byte.
+# The pin is a descendant of the C v1.4.5 release (e4e70927): moving it back to
+# that release would rewind the fragment-window wire fix the port implements and
+# redden TestWireCompatibility, so the release appears in VersionFull and README,
+# not as the pin.
 RELIABLE_C_COMMIT=dfd5541c2ec82e912e67420c07361a3c48bfaa68 # reliable PR 68 (fragment window advance fix)
 
 here="$(cd "$(dirname "$0")" && pwd)"

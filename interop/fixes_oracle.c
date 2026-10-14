@@ -3,7 +3,7 @@
 
     Reference side of the differential check. It includes reliable.c from the
     checkout named by RELIABLE_C_DIR (a checkout of mas-bandwidth/reliable
-    holding the config fixes), runs one of two modes, and prints a transcript
+    holding the fixes), runs one of three modes, and prints a transcript
     the Go side (fixes_diff_test.go) byte-compares.
 
     Packet mode (no arguments): reads a stream of length-prefixed packets from
@@ -21,12 +21,24 @@
     and, for each created config, `ack <sent bytes acknowledged by a peer>`
     after one one-byte send through a default peer.
 
+    Reassembly mode (`reassembly <byte budget> <start step>`): reads a stream of
+    length-prefixed packets from stdin, feeds each in turn to one receiver with
+    fragment_reassembly_byte_budget set to the budget (0 = unbounded), and
+    prints one line per input:
+
+        <step> <fragment refused|accepted> <outstanding reassembly bytes> <the eleven counters>
+
+    "fragment refused" means the receive incremented num_fragments_invalid; the
+    outstanding bytes are the unfinished reassembly buffers, the same total the
+    endpoint's own budget check derives from the live entries.
+
     The Go side builds this file against the same checkout:
 
         cc -O2 -ffp-contract=off -I$RELIABLE_C_DIR -o oracle fixes_oracle.c -lm
 
-    and byte-compares the two transcripts. Keep the line format and the
-    accepted/callback conventions in sync with fixes_diff_test.go.
+    and byte-compares the two transcripts. Keep the line formats, the
+    accepted/refused conventions and the counter order in sync with
+    fixes_diff_test.go.
 */
 
 #include "reliable.c"
@@ -192,7 +204,7 @@ static int run_config_spec( const char * spec )
     reliable_endpoint_send_packet( config_receiver, &byte, 1 );
 
     RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
-    int acknowledged = counters[RELIABLE_ENDPOINT_NUM_PACKETS_ACKED] > 0;
+    int acknowledged = counters[RELIABLE_ENDPOINT_COUNTER_NUM_PACKETS_ACKED] > 0;
 
     printf( "%s created\n", description );
     printf( "ack %d\n", acknowledged ? config.packet_header_size + 1 : 0 );
@@ -204,57 +216,73 @@ static int run_config_spec( const char * spec )
     return 0;
 }
 
-static int run_packet_mode( void )
+// reads one length-prefixed packet into packet_data. returns the length, or -1 at end of stream.
+static int read_packet( uint8_t * packet_data, uint32_t capacity )
+{
+    uint32_t packet_bytes_u32;
+    if ( !read_uint32_le( &packet_bytes_u32 ) )
+        return -1;
+
+    if ( packet_bytes_u32 > capacity )
+    {
+        fprintf( stderr, "oracle: input %u exceeds the %u byte buffer\n", packet_bytes_u32, capacity );
+        exit( 1 );
+    }
+
+    size_t remaining = (size_t) packet_bytes_u32;
+    while ( remaining > 0 )
+    {
+        size_t got = fread( packet_data + ( packet_bytes_u32 - remaining ), 1, remaining, stdin );
+        if ( got == 0 )
+        {
+            fprintf( stderr, "oracle: unexpected EOF on a %u byte input\n", packet_bytes_u32 );
+            exit( 1 );
+        }
+        remaining -= got;
+    }
+    return (int) packet_bytes_u32;
+}
+
+// creates the receiver endpoint every stdin-driven mode shares, with the given
+// fragment reassembly byte budget (the default when budget is the default).
+static struct reliable_endpoint_t * create_receiver( int byte_budget )
 {
     struct reliable_config_t config;
     reliable_default_config( &config );
     reliable_copy_string( config.name, "receiver", sizeof( config.name ) );
     config.transmit_packet_function = &transmit_packet;
     config.process_packet_function = &process_packet;
+    config.fragment_reassembly_byte_budget = byte_budget;
 
     struct reliable_endpoint_t * endpoint = reliable_endpoint_create( &config, 100.0 );
     if ( !endpoint )
     {
         fprintf( stderr, "oracle: could not create endpoint\n" );
-        return 1;
+        exit( 1 );
     }
+    return endpoint;
+}
+
+static int run_packet_mode( void )
+{
+    struct reliable_endpoint_t * endpoint = create_receiver( 256 * 1024 );
+
+    // a large packet is at most max_packet_size + the packet and fragment headers.
+    static uint8_t packet_data[ 64 * 1024 ];
 
     unsigned long n = 0;
     for ( ;; )
     {
-        uint32_t packet_bytes_u32;
-        if ( !read_uint32_le( &packet_bytes_u32 ) )
-        {
+        int packet_bytes = read_packet( packet_data, (uint32_t) sizeof( packet_data ) );
+        if ( packet_bytes < 0 )
             break;
-        }
 
         n++;
-
-        if ( packet_bytes_u32 > 1024 * 1024 )
-        {
-            fprintf( stderr, "oracle: input %lu too large\n", n );
-            return 1;
-        }
-
-        static uint8_t packet_data[1024 * 1024];
-
-        size_t remaining = (size_t) packet_bytes_u32;
-        while ( remaining > 0 )
-        {
-            size_t got = fread( packet_data + ( packet_bytes_u32 - remaining ), 1, remaining, stdin );
-            if ( got == 0 )
-            {
-                fprintf( stderr, "oracle: unexpected EOF on input %lu\n", n );
-                return 1;
-            }
-            remaining -= got;
-        }
-
         callback_ran = 0;
         delivered_sequence = 0;
         delivered_bytes = 0;
 
-        reliable_endpoint_receive_packet( endpoint, packet_data, (int) packet_bytes_u32 );
+        reliable_endpoint_receive_packet( endpoint, packet_data, packet_bytes );
 
         RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
 
@@ -266,6 +294,47 @@ static int run_packet_mode( void )
             printf( " %" PRIu64, counters[i] );
         }
         printf( "\n" );
+    }
+
+    reliable_endpoint_destroy( endpoint );
+    return 0;
+}
+
+// the reassembly byte budget mode: one line per input with the outstanding bytes.
+
+static int run_reassembly_mode( int byte_budget, unsigned long start_step )
+{
+    struct reliable_endpoint_t * endpoint = create_receiver( byte_budget );
+
+    static uint8_t packet_data[ 64 * 1024 ];
+
+    unsigned long step = start_step;
+    for ( ;; )
+    {
+        int packet_bytes = read_packet( packet_data, (uint32_t) sizeof( packet_data ) );
+        if ( packet_bytes < 0 )
+            break;
+
+        RELIABLE_CONST uint64_t * counters = reliable_endpoint_counters( endpoint );
+        const uint64_t before_invalid = counters[RELIABLE_ENDPOINT_COUNTER_NUM_FRAGMENTS_INVALID];
+
+        reliable_endpoint_receive_packet( endpoint, packet_data, packet_bytes );
+
+        counters = reliable_endpoint_counters( endpoint );
+        const int refused = counters[RELIABLE_ENDPOINT_COUNTER_NUM_FRAGMENTS_INVALID] != before_invalid;
+
+        const size_t unfinished_bytes = reliable_endpoint_unfinished_reassembly_bytes( endpoint );
+
+        printf( "%lu %s %zu", step, refused ? "refused" : "accepted", unfinished_bytes );
+
+        int i;
+        for ( i = 0; i < RELIABLE_ENDPOINT_NUM_COUNTERS; ++i )
+        {
+            printf( " %" PRIu64, counters[i] );
+        }
+        printf( "\n" );
+
+        step++;
     }
 
     reliable_endpoint_destroy( endpoint );
@@ -286,6 +355,13 @@ int main( int argc, char ** argv )
             }
         }
         return 0;
+    }
+
+    if ( argc >= 2 && strcmp( argv[1], "reassembly" ) == 0 )
+    {
+        const int byte_budget = ( argc >= 3 ) ? (int) strtol( argv[2], NULL, 10 ) : 0;
+        const unsigned long start_step = ( argc >= 4 ) ? (unsigned long) strtoul( argv[3], NULL, 10 ) : 1;
+        return run_reassembly_mode( byte_budget, start_step );
     }
 
     return run_packet_mode();

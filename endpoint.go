@@ -28,9 +28,9 @@ type Config struct {
 	MaxFragments                 int                    // maximum number of fragments per-packet. 256 max. must cover MaxPacketSize / FragmentSize
 	FragmentSize                 int                    // size of each fragment (bytes)
 	AckBufferSize                int                    // maximum number of acks buffered between calls to Endpoint.ClearAcks
-	SentPacketsBufferSize        int                    // number of sent packets tracked for acks, packet loss and bandwidth stats
-	ReceivedPacketsBufferSize    int                    // number of received packets tracked. also the window for stale and duplicate packet rejection
-	FragmentReassemblyBufferSize int                    // number of packets that can be under reassembly from fragments at the same time
+	SentPacketsBufferSize        int                    // number of sent packets tracked for acks, packet loss and bandwidth stats. must be a power of two no larger than 16384
+	ReceivedPacketsBufferSize    int                    // number of received packets tracked. also the window for stale and duplicate packet rejection. must be a power of two no larger than 16384
+	FragmentReassemblyBufferSize int                    // number of packets that can be under reassembly from fragments at the same time. must be a power of two no larger than 16384
 	RTTSmoothingFactor           float64                // exponential smoothing factor for the rtt moving average
 	RTTHistorySize               int                    // number of rtt samples kept for min/max/avg rtt and jitter
 	PacketLossSmoothingFactor    float64                // exponential smoothing factor for packet loss
@@ -117,6 +117,15 @@ type Endpoint struct {
 	counters              [NumCounters]uint64
 }
 
+// validSequenceBufferSize reports whether n is a usable size for one of the
+// sequence buffers. The 16 bit sequence number indexes the buffer with
+// sequence % numEntries, so n must be a power of two: a size that is not makes
+// sequence 0 stale on a cold buffer, and a size that does not divide 65536
+// aliases after the sequence wraps.
+func validSequenceBufferSize(n int) bool {
+	return n > 0 && n <= 16384 && n&(n-1) == 0
+}
+
 // NewEndpoint creates an endpoint. The time is your current time in seconds.
 func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config == nil {
@@ -137,14 +146,14 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config.AckBufferSize <= 0 {
 		return nil, errors.New("reliable: ack buffer size must be positive")
 	}
-	if config.SentPacketsBufferSize <= 0 {
-		return nil, errors.New("reliable: sent packets buffer size must be positive")
+	if !validSequenceBufferSize(config.SentPacketsBufferSize) {
+		return nil, errors.New("reliable: sent packets buffer size must be a power of two no larger than 16384")
 	}
-	if config.ReceivedPacketsBufferSize <= 0 {
-		return nil, errors.New("reliable: received packets buffer size must be positive")
+	if !validSequenceBufferSize(config.ReceivedPacketsBufferSize) {
+		return nil, errors.New("reliable: received packets buffer size must be a power of two no larger than 16384")
 	}
-	if config.FragmentReassemblyBufferSize <= 0 {
-		return nil, errors.New("reliable: fragment reassembly buffer size must be positive")
+	if !validSequenceBufferSize(config.FragmentReassemblyBufferSize) {
+		return nil, errors.New("reliable: fragment reassembly buffer size must be a power of two no larger than 16384")
 	}
 	if config.RTTHistorySize <= 0 {
 		return nil, errors.New("reliable: rtt history size must be positive")
@@ -173,7 +182,7 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config.PacketHeaderSize < 0 {
 		return nil, errors.New("reliable: packet header size must not be negative")
 	}
-	if config.PacketHeaderSize > maxInt-config.MaxPacketSize {
+	if config.PacketHeaderSize > maxInt-config.MaxPacketSize-MaxPacketHeaderBytes-FragmentHeaderBytes {
 		return nil, errors.New("reliable: packet header size plus max packet size does not fit a packet length")
 	}
 

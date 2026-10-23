@@ -97,3 +97,10 @@ jobs:
             exit 1
           fi
           echo "STANDARD.md matches upstream"
+
+  roadmap:
+    name: ROADMAP.md matches docs/roadmap.sexp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make roadmap-check

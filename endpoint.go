@@ -297,7 +297,7 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 
 		copy(transmitPacketData[packetHeaderBytes:], packetData)
 
-		endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, transmitPacketData[:packetHeaderBytes+packetBytes])
+		endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, transmitPacketData[:packetHeaderBytes+packetBytes:packetHeaderBytes+packetBytes])
 	} else {
 		// fragmented packet
 
@@ -347,7 +347,7 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 			p += bytesToCopy
 			q += bytesToCopy
 
-			endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, fragmentPacketData[:p])
+			endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, fragmentPacketData[:p:p])
 
 			endpoint.counters[CounterNumFragmentsSent]++
 		}
@@ -464,7 +464,7 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 			logPrintf(LogLevelDebug, "[%s] processing packet %d\n", endpoint.config.Name, sequence)
 		}
 
-		if endpoint.config.ProcessPacketFunction(endpoint.config.ID, sequence, packetData[packetHeaderBytes:]) {
+		if endpoint.config.ProcessPacketFunction(endpoint.config.ID, sequence, packetData[packetHeaderBytes:packetBytes:packetBytes]) {
 			if debugLogging() {
 				logPrintf(LogLevelDebug, "[%s] process packet %d successful\n", endpoint.config.Name, sequence)
 			}

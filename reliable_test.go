@@ -514,6 +514,98 @@ func TestNewEndpointSmoothingFactorRangeValidation(t *testing.T) {
 	}
 }
 
+// checkCallbackPacketSlice verifies that a packet slice handed to a user
+// callback has no spare capacity, so an append inside the callback allocates
+// a new array instead of writing into the endpoint's reusable buffer.
+func checkCallbackPacketSlice(t *testing.T, callback string, packetData []byte) {
+	t.Helper()
+
+	if len(packetData) != cap(packetData) {
+		t.Fatalf("%s callback received slice with len %d and cap %d, expected cap == len",
+			callback, len(packetData), cap(packetData))
+	}
+
+	window := packetData[:cap(packetData)]
+	before := append([]byte(nil), window...)
+
+	appended := append(packetData, 0xAA, 0xBB)
+
+	if len(appended) != len(before)+2 {
+		t.Fatalf("%s callback append returned length %d, expected %d",
+			callback, len(appended), len(before)+2)
+	}
+
+	for i := range window {
+		if window[i] != before[i] {
+			t.Fatalf("%s callback append corrupted byte %d of the endpoint buffer", callback, i)
+		}
+	}
+}
+
+func TestCallbackPacketSliceCapacity(t *testing.T) {
+	smallPayload := make([]byte, 64)
+	for i := range smallPayload {
+		smallPayload[i] = byte(i)
+	}
+
+	largePayload := make([]byte, 3000)
+	for i := range largePayload {
+		largePayload[i] = byte(i)
+	}
+
+	t.Run("transmit regular packet", func(t *testing.T) {
+		config := DefaultConfig()
+		config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {
+			checkCallbackPacketSlice(t, "transmit", packetData)
+		}
+		config.ProcessPacketFunction = testProcessPacketFunction
+
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		endpoint.SendPacket(smallPayload)
+	})
+
+	t.Run("transmit fragmented packet", func(t *testing.T) {
+		config := DefaultConfig()
+		config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {
+			checkCallbackPacketSlice(t, "transmit", packetData)
+		}
+		config.ProcessPacketFunction = testProcessPacketFunction
+
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		endpoint.SendPacket(largePayload)
+	})
+
+	t.Run("process packet", func(t *testing.T) {
+		config := DefaultConfig()
+		config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {}
+		config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+			checkCallbackPacketSlice(t, "process", packetData)
+			return true
+		}
+
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		// Build a valid packet in an oversized backing array so the slice
+		// passed to ReceivePacket has spare capacity.
+		raw := make([]byte, MaxPacketHeaderBytes+len(smallPayload), 2048)
+		headerBytes := writePacketHeader(raw, 0, 0xFFFF, 0)
+		copy(raw[headerBytes:], smallPayload)
+
+		endpoint.ReceivePacket(raw[:headerBytes+len(smallPayload)])
+	})
+}
+
 // newTestEndpointPair creates a connected sender/receiver pair with the given
 // config modifications applied to both endpoints.
 func newTestEndpointPair(t *testing.T, context *testContext, time float64, modifyConfig func(senderConfig, receiverConfig *Config)) {

@@ -1,6 +1,7 @@
 package reliable
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -440,7 +441,7 @@ func TestAcks(t *testing.T) {
 			senderAckedPacket[ack] = true
 		}
 	}
-	for i := 0; i < testAcksNumIterations/2; i++ {
+	for i := 0; i < testAcksNumIterations-32; i++ {
 		if !senderAckedPacket[i] {
 			t.Fatalf("expected sender packet %d to be acked", i)
 		}
@@ -453,7 +454,7 @@ func TestAcks(t *testing.T) {
 			receiverAckedPacket[ack] = true
 		}
 	}
-	for i := 0; i < testAcksNumIterations/2; i++ {
+	for i := 0; i < testAcksNumIterations-32; i++ {
 		if !receiverAckedPacket[i] {
 			t.Fatalf("expected receiver packet %d to be acked", i)
 		}
@@ -490,7 +491,7 @@ func TestAcksPacketLoss(t *testing.T) {
 			senderAckedPacket[ack] = true
 		}
 	}
-	for i := 0; i < testAcksNumIterations/2; i++ {
+	for i := 0; i < testAcksNumIterations-32; i++ {
 		expected := (i+1)%2 != 0
 		if senderAckedPacket[i] != expected {
 			t.Fatalf("expected sender packet %d acked to be %v", i, expected)
@@ -504,11 +505,193 @@ func TestAcksPacketLoss(t *testing.T) {
 			receiverAckedPacket[ack] = true
 		}
 	}
-	for i := 0; i < testAcksNumIterations/2; i++ {
+	for i := 0; i < testAcksNumIterations-32; i++ {
 		expected := (i+1)%2 != 0
 		if receiverAckedPacket[i] != expected {
 			t.Fatalf("expected receiver packet %d acked to be %v", i, expected)
 		}
+	}
+}
+
+func TestSendPacketEmpty(t *testing.T) {
+	config := endpointConfigForValidation()
+	endpoint, err := NewEndpoint(&config, 0)
+	if err != nil {
+		t.Fatalf("could not create endpoint: %v", err)
+	}
+
+	for _, packetData := range [][]byte{nil, {}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected SendPacket with empty packet data to panic")
+				}
+			}()
+			endpoint.SendPacket(packetData)
+		}()
+	}
+}
+
+func TestSendPacketTooLarge(t *testing.T) {
+	config := endpointConfigForValidation()
+
+	transmitted := 0
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {
+		transmitted++
+	}
+
+	endpoint, err := NewEndpoint(&config, 0)
+	if err != nil {
+		t.Fatalf("could not create endpoint: %v", err)
+	}
+
+	endpoint.SendPacket(make([]byte, config.MaxPacketSize+1))
+
+	if transmitted != 0 {
+		t.Fatalf("expected no packets transmitted, got %d", transmitted)
+	}
+	counters := endpoint.Counters()
+	if counters[CounterNumPacketsTooLargeToSend] != 1 {
+		t.Fatalf("expected 1 packet too large to send, got %d", counters[CounterNumPacketsTooLargeToSend])
+	}
+	if counters[CounterNumPacketsSent] != 0 {
+		t.Fatalf("expected 0 packets sent, got %d", counters[CounterNumPacketsSent])
+	}
+	if endpoint.NextPacketSequence() != 0 {
+		t.Fatalf("expected sequence 0 after oversized send, got %d", endpoint.NextPacketSequence())
+	}
+}
+
+func TestReceivePacketEmpty(t *testing.T) {
+	config := endpointConfigForValidation()
+
+	processed := 0
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+		processed++
+		return true
+	}
+
+	endpoint, err := NewEndpoint(&config, 0)
+	if err != nil {
+		t.Fatalf("could not create endpoint: %v", err)
+	}
+
+	for _, packetData := range [][]byte{nil, {}} {
+		endpoint.ReceivePacket(packetData)
+	}
+
+	if processed != 0 {
+		t.Fatalf("expected no packets processed, got %d", processed)
+	}
+	counters := endpoint.Counters()
+	if counters[CounterNumPacketsInvalid] != 2 {
+		t.Fatalf("expected 2 invalid packets, got %d", counters[CounterNumPacketsInvalid])
+	}
+	if counters[CounterNumPacketsReceived] != 0 {
+		t.Fatalf("expected 0 packets received, got %d", counters[CounterNumPacketsReceived])
+	}
+}
+
+func TestReceivePacketTooLarge(t *testing.T) {
+	t.Run("packet exceeds maximum receive size", func(t *testing.T) {
+		config := endpointConfigForValidation()
+
+		processed := 0
+		config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+			processed++
+			return true
+		}
+
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		endpoint.ReceivePacket(make([]byte, config.MaxPacketSize+MaxPacketHeaderBytes+FragmentHeaderBytes+1))
+
+		if processed != 0 {
+			t.Fatalf("expected no packets processed, got %d", processed)
+		}
+		counters := endpoint.Counters()
+		if counters[CounterNumPacketsTooLargeToReceive] != 1 {
+			t.Fatalf("expected 1 packet too large to receive, got %d", counters[CounterNumPacketsTooLargeToReceive])
+		}
+		if counters[CounterNumPacketsReceived] != 0 {
+			t.Fatalf("expected 0 packets received, got %d", counters[CounterNumPacketsReceived])
+		}
+	})
+
+	t.Run("payload exceeds maximum packet size", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		config.MaxPacketSize = 64
+		config.FragmentAbove = config.MaxPacketSize
+
+		processed := 0
+		config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+			processed++
+			return true
+		}
+
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		packetData := make([]byte, MaxPacketHeaderBytes+config.MaxPacketSize+1)
+		headerBytes := writePacketHeader(packetData, 0, 0xFFFF, 0)
+		payloadBytes := config.MaxPacketSize + 1
+
+		endpoint.ReceivePacket(packetData[:headerBytes+payloadBytes])
+
+		if processed != 0 {
+			t.Fatalf("expected no packets processed, got %d", processed)
+		}
+		counters := endpoint.Counters()
+		if counters[CounterNumPacketsTooLargeToReceive] != 1 {
+			t.Fatalf("expected 1 packet too large to receive, got %d", counters[CounterNumPacketsTooLargeToReceive])
+		}
+		if counters[CounterNumPacketsReceived] != 1 {
+			t.Fatalf("expected 1 packet received, got %d", counters[CounterNumPacketsReceived])
+		}
+	})
+}
+
+func TestLoggingPacketExchange(t *testing.T) {
+	var logs []string
+
+	SetPrintfFunction(func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	t.Cleanup(func() {
+		SetLogLevel(LogLevelNone)
+		SetPrintfFunction(func(format string, args ...any) {
+			fmt.Printf(format, args...)
+		})
+	})
+
+	for _, level := range []LogLevel{LogLevelDebug, LogLevelError} {
+		t.Run(fmt.Sprintf("level %d", level), func(t *testing.T) {
+			logs = logs[:0]
+			SetLogLevel(level)
+
+			time := 100.0
+
+			context := newTestContext()
+
+			newTestEndpointPair(t, context, time, nil)
+
+			context.sender.SendPacket(make([]byte, 8))
+			context.receiver.SendPacket(make([]byte, 8))
+
+			context.sender.Update(time)
+			context.receiver.Update(time)
+
+			context.sender.SendPacket(make([]byte, context.sender.config.MaxPacketSize+1))
+
+			if len(logs) == 0 {
+				t.Fatalf("expected log output with %v enabled", level)
+			}
+		})
 	}
 }
 
@@ -749,12 +932,20 @@ func validatePacketData(t *testing.T, packetData []byte) {
 	}
 }
 
+const (
+	testPacketsNumIterations   = 16
+	testPacketsNumPerIteration = 2
+)
+
 func TestPackets(t *testing.T) {
 	time := 100.0
 
 	context := newTestContext()
 
+	delivered := 0
+
 	processPacketValidate := func(id uint64, sequence uint16, packetData []byte) bool {
+		delivered++
 		validatePacketData(t, packetData)
 		return true
 	}
@@ -768,7 +959,7 @@ func TestPackets(t *testing.T) {
 
 	deltaTime := 0.1
 
-	for i := 0; i < 16; i++ {
+	for i := 0; i < testPacketsNumIterations; i++ {
 		{
 			var packetData [testMaxPacketBytes]byte
 			sequence := context.sender.NextPacketSequence()
@@ -790,6 +981,11 @@ func TestPackets(t *testing.T) {
 		context.receiver.ClearAcks()
 
 		time += deltaTime
+	}
+
+	expectedDelivered := testPacketsNumIterations * testPacketsNumPerIteration
+	if delivered != expectedDelivered {
+		t.Fatalf("expected %d packets delivered, got %d", expectedDelivered, delivered)
 	}
 }
 

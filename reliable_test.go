@@ -695,6 +695,217 @@ func TestLoggingPacketExchange(t *testing.T) {
 	}
 }
 
+func makeTestRegularPacket(config *Config, sequence uint16, payload []byte) []byte {
+	packetData := make([]byte, MaxPacketHeaderBytes+len(payload))
+	headerBytes := writePacketHeader(packetData, sequence, 0xFFFF, 0)
+	copy(packetData[headerBytes:], payload)
+	return packetData[:headerBytes+len(payload)]
+}
+
+func makeTestFragmentPacket(config *Config, sequence uint16, fragmentID, numFragments int) []byte {
+	packetData := make([]byte, FragmentHeaderBytes+MaxPacketHeaderBytes+config.FragmentSize)
+
+	packetData[0] = 1
+	packetData[1] = byte(sequence)
+	packetData[2] = byte(sequence >> 8)
+	packetData[3] = byte(fragmentID)
+	packetData[4] = byte(numFragments - 1)
+
+	p := FragmentHeaderBytes
+	if fragmentID == 0 {
+		p += writePacketHeader(packetData[p:], sequence, 0xFFFF, 0)
+	}
+
+	p += config.FragmentSize
+
+	return packetData[:p]
+}
+
+func TestNetworkEventLogLevels(t *testing.T) {
+	scenarios := []struct {
+		name  string
+		setup func(t *testing.T) func()
+		want  string
+	}{
+		{
+			name: "oversized payload",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				config.MaxPacketSize = 64
+				config.FragmentAbove = config.MaxPacketSize
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				packet := makeTestRegularPacket(&config, 0, make([]byte, config.MaxPacketSize+1))
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "packet too large to receive. packet is at",
+		},
+		{
+			name: "callback rejection",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+					return false
+				}
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				packet := makeTestRegularPacket(&config, 0, make([]byte, 8))
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "process packet failed",
+		},
+		{
+			name: "stale fragment",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				config.FragmentReassemblyBufferSize = 2
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				for sequence := uint16(0); sequence < 3; sequence++ {
+					endpoint.ReceivePacket(makeTestFragmentPacket(&config, sequence, 0, 2))
+				}
+				packet := makeTestFragmentPacket(&config, 0, 0, 2)
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "could not insert in reassembly buffer (stale)",
+		},
+		{
+			name: "fragment count mismatch",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				endpoint.ReceivePacket(makeTestFragmentPacket(&config, 0, 0, 2))
+				packet := makeTestFragmentPacket(&config, 0, 0, 3)
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "fragment count mismatch",
+		},
+		{
+			name: "duplicate fragment",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				packet := makeTestFragmentPacket(&config, 0, 0, 2)
+				endpoint.ReceivePacket(packet)
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "fragment already received",
+		},
+	}
+
+	var logs []string
+
+	SetPrintfFunction(func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	t.Cleanup(func() {
+		SetLogLevel(LogLevelNone)
+		SetPrintfFunction(func(format string, args ...any) {
+			fmt.Printf(format, args...)
+		})
+	})
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			SetLogLevel(LogLevelNone)
+			trigger := scenario.setup(t)
+			logs = logs[:0]
+
+			SetLogLevel(LogLevelError)
+			trigger()
+			for _, line := range logs {
+				if strings.Contains(line, scenario.want) {
+					t.Fatalf("expected %q at debug level only, got error log: %q", scenario.want, line)
+				}
+			}
+
+			SetLogLevel(LogLevelNone)
+			trigger = scenario.setup(t)
+			logs = logs[:0]
+
+			SetLogLevel(LogLevelDebug)
+			trigger()
+			found := false
+			for _, line := range logs {
+				if strings.Contains(line, scenario.want) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected %q with debug logging enabled, got %v", scenario.want, logs)
+			}
+		})
+	}
+}
+
+func TestReceivePacketDoesNotAllocateWhenLoggingDisabled(t *testing.T) {
+	SetLogLevel(LogLevelNone)
+	t.Cleanup(func() {
+		SetLogLevel(LogLevelNone)
+	})
+
+	t.Run("duplicate fragment", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		config.Name = "receiver"
+		endpoint, err := NewEndpoint(&config, 100)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		packet := makeTestFragmentPacket(&config, 0, 0, 2)
+		endpoint.ReceivePacket(packet)
+		if endpoint.Counters()[CounterNumFragmentsReceived] != 1 {
+			t.Fatal("expected fragment to be stored before measuring")
+		}
+
+		allocs := testing.AllocsPerRun(100, func() {
+			endpoint.ReceivePacket(packet)
+		})
+		if allocs != 0 {
+			t.Fatalf("expected 0 allocations without logging, got %v", allocs)
+		}
+	})
+
+	t.Run("rejected packet", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		config.Name = "receiver"
+		config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+			return false
+		}
+		endpoint, err := NewEndpoint(&config, 100)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		packet := makeTestRegularPacket(&config, 0, make([]byte, 8))
+
+		allocs := testing.AllocsPerRun(100, func() {
+			endpoint.ReceivePacket(packet)
+		})
+		if allocs != 0 {
+			t.Fatalf("expected 0 allocations without logging, got %v", allocs)
+		}
+	})
+}
+
 const testDuplicatePacketsNumIterations = 16
 
 func TestDuplicatePackets(t *testing.T) {

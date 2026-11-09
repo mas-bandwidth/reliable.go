@@ -472,7 +472,7 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 	} else {
 		// fragment packet
 
-		fragmentID, numFragments, _, sequence, ack, ackBits, fragmentHeaderBytes := readFragmentHeader(endpoint.config.Name, packetData, endpoint.config.MaxFragments, endpoint.config.FragmentSize)
+		fragmentID, numFragments, sequence, ack, ackBits, fragmentHeaderBytes := readFragmentHeader(endpoint.config.Name, packetData, endpoint.config.MaxFragments, endpoint.config.FragmentSize)
 
 		if fragmentHeaderBytes < 0 {
 			if debugLogging() {

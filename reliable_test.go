@@ -1,6 +1,7 @@
 package reliable
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -319,6 +320,60 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 			t.Fatal("expected endpoint for equal threshold config")
 		}
 	})
+}
+
+func TestNewEndpointBufferSizeValidation(t *testing.T) {
+	bufferSizes := []struct {
+		name   string
+		modify func(*Config, int)
+	}{
+		{
+			name: "sent packets",
+			modify: func(config *Config, size int) {
+				config.SentPacketsBufferSize = size
+			},
+		},
+		{
+			name: "received packets",
+			modify: func(config *Config, size int) {
+				config.ReceivedPacketsBufferSize = size
+			},
+		},
+		{
+			name: "fragment reassembly",
+			modify: func(config *Config, size int) {
+				config.FragmentReassemblyBufferSize = size
+			},
+		},
+	}
+
+	for _, bufferSize := range bufferSizes {
+		for _, invalidSize := range []int{16385, 32768, 65536} {
+			t.Run(bufferSize.name+" rejects "+strconv.Itoa(invalidSize), func(t *testing.T) {
+				config := endpointConfigForValidation()
+				bufferSize.modify(&config, invalidSize)
+				endpoint, err := NewEndpoint(&config, 0)
+				if err == nil {
+					if endpoint != nil {
+						t.Fatal("expected oversized config to be refused")
+					}
+					t.Fatal("expected oversized config error")
+				}
+			})
+		}
+
+		t.Run(bufferSize.name+" accepts 16384", func(t *testing.T) {
+			config := endpointConfigForValidation()
+			bufferSize.modify(&config, 16384)
+			endpoint, err := NewEndpoint(&config, 0)
+			if err != nil {
+				t.Fatalf("maximum buffer size was refused: %v", err)
+			}
+			if endpoint == nil {
+				t.Fatal("expected endpoint for maximum buffer size")
+			}
+		})
+	}
 }
 
 // newTestEndpointPair creates a connected sender/receiver pair with the given

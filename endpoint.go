@@ -137,14 +137,14 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config.AckBufferSize <= 0 {
 		return nil, errors.New("reliable: ack buffer size must be positive")
 	}
-	if config.SentPacketsBufferSize <= 0 {
-		return nil, errors.New("reliable: sent packets buffer size must be positive")
+	if config.SentPacketsBufferSize <= 0 || config.SentPacketsBufferSize > 16384 {
+		return nil, errors.New("reliable: sent packets buffer size must be in [1,16384]")
 	}
-	if config.ReceivedPacketsBufferSize <= 0 {
-		return nil, errors.New("reliable: received packets buffer size must be positive")
+	if config.ReceivedPacketsBufferSize <= 0 || config.ReceivedPacketsBufferSize > 16384 {
+		return nil, errors.New("reliable: received packets buffer size must be in [1,16384]")
 	}
-	if config.FragmentReassemblyBufferSize <= 0 {
-		return nil, errors.New("reliable: fragment reassembly buffer size must be positive")
+	if config.FragmentReassemblyBufferSize <= 0 || config.FragmentReassemblyBufferSize > 16384 {
+		return nil, errors.New("reliable: fragment reassembly buffer size must be in [1,16384]")
 	}
 	if config.RTTHistorySize <= 0 {
 		return nil, errors.New("reliable: rtt history size must be positive")

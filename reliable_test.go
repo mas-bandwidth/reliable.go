@@ -1212,3 +1212,158 @@ func TestBandwidthStats(t *testing.T) {
 	requireStatClose(t, "ReceivedBandwidthKBPS", receivedBandwidthKbps, expectedReceivedBandwidthKbps)
 	requireStatClose(t, "AckedBandwidthKBPS", ackedBandwidthKbps, expectedAckedBandwidthKbps)
 }
+
+func TestSequenceBufferAcrossWrap(t *testing.T) {
+	for _, size := range []int{3, 255} {
+		size := size
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			buffer := newSequenceBuffer[testSequenceData](size)
+
+			if buffer.numEntries < size || 65536%buffer.numEntries != 0 {
+				t.Fatalf("expected entry count to divide 65536, got %d for size %d", buffer.numEntries, size)
+			}
+
+			for sequence := 0; sequence <= 65535; sequence++ {
+				entry := buffer.insert(uint16(sequence))
+				if entry == nil {
+					t.Fatalf("insert failed for sequence %d", sequence)
+				}
+				entry.sequence = uint16(sequence)
+			}
+
+			entry := buffer.insert(0)
+			if entry == nil {
+				t.Fatal("insert failed for sequence 0")
+			}
+			entry.sequence = 0
+
+			kept := buffer.find(65535)
+			if kept == nil || kept.sequence != 65535 {
+				t.Fatal("expected sequence 65535 to stay in the buffer")
+			}
+			if buffer.find(0) == nil {
+				t.Fatal("expected sequence 0 to stay in the buffer")
+			}
+
+			ack, ackBits := buffer.generateAckBits()
+			if ack != 0 {
+				t.Fatalf("expected ack 0, got %d", ack)
+			}
+			if ackBits&1 == 0 {
+				t.Fatalf("expected sequence 0 to be acked, ack bits %#x", ackBits)
+			}
+			if ackBits&2 == 0 {
+				t.Fatalf("expected sequence 65535 to be acked, ack bits %#x", ackBits)
+			}
+
+			replayed := buffer.insert(65535)
+			if replayed == nil || replayed.sequence != 65535 {
+				t.Fatal("expected replay of sequence 65535 to keep its entry")
+			}
+			if zero := buffer.find(0); zero == nil || zero.sequence != 0 {
+				t.Fatal("expected sequence 0 to stay in the buffer after replay")
+			}
+		})
+	}
+}
+
+func testPacketsAcrossSequenceWrap(t *testing.T, bufferSize int) {
+	t.Helper()
+
+	time := 100.0
+
+	var sender *Endpoint
+	var receiver *Endpoint
+	var packet65535 []byte
+	deliveries := 0
+
+	transmit := func(id uint64, sequence uint16, packetData []byte) {
+		if id == 0 {
+			if sequence == 65535 && packet65535 == nil {
+				packet65535 = append([]byte(nil), packetData...)
+			}
+			receiver.ReceivePacket(packetData)
+			return
+		}
+		sender.ReceivePacket(packetData)
+	}
+	process := func(id uint64, sequence uint16, packetData []byte) bool {
+		if id == 1 && sequence == 65535 {
+			deliveries++
+		}
+		return true
+	}
+
+	senderConfig := DefaultConfig()
+	receiverConfig := DefaultConfig()
+	senderConfig.Name = "sender"
+	senderConfig.ID = 0
+	senderConfig.TransmitPacketFunction = transmit
+	senderConfig.ProcessPacketFunction = process
+	senderConfig.SentPacketsBufferSize = bufferSize
+	senderConfig.ReceivedPacketsBufferSize = bufferSize
+	receiverConfig.Name = "receiver"
+	receiverConfig.ID = 1
+	receiverConfig.TransmitPacketFunction = transmit
+	receiverConfig.ProcessPacketFunction = process
+	receiverConfig.SentPacketsBufferSize = bufferSize
+	receiverConfig.ReceivedPacketsBufferSize = bufferSize
+
+	var err error
+	sender, err = NewEndpoint(&senderConfig, time)
+	if err != nil {
+		t.Fatalf("could not create sender endpoint: %v", err)
+	}
+	receiver, err = NewEndpoint(&receiverConfig, time)
+	if err != nil {
+		t.Fatalf("could not create receiver endpoint: %v", err)
+	}
+
+	packet := make([]byte, 8)
+	for sender.NextPacketSequence() != 65535 {
+		sender.SendPacket(packet)
+	}
+	sender.SendPacket(packet)
+	if sender.NextPacketSequence() != 0 {
+		t.Fatalf("expected sender sequence 0, got %d", sender.NextPacketSequence())
+	}
+	if deliveries != 1 {
+		t.Fatalf("expected sequence 65535 to be delivered once, got %d", deliveries)
+	}
+
+	sender.SendPacket(packet)
+	if deliveries != 1 {
+		t.Fatalf("expected sequence 65535 to be delivered once, got %d", deliveries)
+	}
+	if packet65535 == nil {
+		t.Fatal("expected packet 65535 to be captured")
+	}
+
+	receiver.ReceivePacket(packet65535)
+	if deliveries != 1 {
+		t.Fatalf("expected sequence 65535 to be delivered once, got %d", deliveries)
+	}
+
+	receiver.SendPacket(packet)
+
+	acked := false
+	for _, ack := range sender.Acks() {
+		if ack == 65535 {
+			acked = true
+			break
+		}
+	}
+	if !acked {
+		t.Fatal("expected ack for sequence 65535")
+	}
+}
+
+func TestPacketsAcrossSequenceWrap(t *testing.T) {
+	t.Run("3", func(t *testing.T) {
+		testPacketsAcrossSequenceWrap(t, 3)
+	})
+
+	t.Run("255", func(t *testing.T) {
+		testPacketsAcrossSequenceWrap(t, 255)
+	})
+}

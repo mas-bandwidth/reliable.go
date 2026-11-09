@@ -725,7 +725,7 @@ func (endpoint *Endpoint) Update(time float64) {
 	// calculate sent bandwidth
 	{
 		baseSequence := endpoint.sentPackets.sequence - uint16(endpoint.config.SentPacketsBufferSize) + 1 + 0xFFFF
-		bytesSent := 0
+		var bytesSent int64
 		startTime := math.MaxFloat64
 		finishTime := 0.0
 		numSamples := endpoint.config.SentPacketsBufferSize / 2
@@ -735,7 +735,7 @@ func (endpoint *Endpoint) Update(time float64) {
 			if sentPacket == nil {
 				continue
 			}
-			bytesSent += int(sentPacket.packetBytes)
+			bytesSent += int64(sentPacket.packetBytes)
 			if sentPacket.time < startTime {
 				startTime = sentPacket.time
 			}
@@ -756,7 +756,7 @@ func (endpoint *Endpoint) Update(time float64) {
 	// calculate received bandwidth
 	{
 		baseSequence := endpoint.receivedPackets.sequence - uint16(endpoint.config.ReceivedPacketsBufferSize) + 1 + 0xFFFF
-		bytesReceived := 0
+		var bytesReceived int64
 		startTime := math.MaxFloat64
 		finishTime := 0.0
 		numSamples := endpoint.config.ReceivedPacketsBufferSize / 2
@@ -766,7 +766,7 @@ func (endpoint *Endpoint) Update(time float64) {
 			if receivedPacket == nil {
 				continue
 			}
-			bytesReceived += int(receivedPacket.packetBytes)
+			bytesReceived += int64(receivedPacket.packetBytes)
 			if receivedPacket.time < startTime {
 				startTime = receivedPacket.time
 			}
@@ -787,7 +787,7 @@ func (endpoint *Endpoint) Update(time float64) {
 	// calculate acked bandwidth
 	{
 		baseSequence := endpoint.sentPackets.sequence - uint16(endpoint.config.SentPacketsBufferSize) + 1 + 0xFFFF
-		bytesSent := 0
+		var bytesSent int64
 		startTime := math.MaxFloat64
 		finishTime := 0.0
 		numSamples := endpoint.config.SentPacketsBufferSize / 2
@@ -797,7 +797,7 @@ func (endpoint *Endpoint) Update(time float64) {
 			if sentPacket == nil || !sentPacket.acked {
 				continue
 			}
-			bytesSent += int(sentPacket.packetBytes)
+			bytesSent += int64(sentPacket.packetBytes)
 			if sentPacket.time < startTime {
 				startTime = sentPacket.time
 			}

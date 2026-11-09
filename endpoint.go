@@ -594,7 +594,7 @@ func (endpoint *Endpoint) Update(time float64) {
 
 	// calculate min and max rtt
 	{
-		minRTT := 10000.0
+		minRTT := math.MaxFloat64
 		maxRTT := 0.0
 		sumRTT := 0.0
 		count := 0
@@ -610,7 +610,7 @@ func (endpoint *Endpoint) Update(time float64) {
 				count++
 			}
 		}
-		if minRTT == 10000.0 {
+		if count == 0 {
 			minRTT = 0.0
 		}
 		endpoint.rttMin = minRTT

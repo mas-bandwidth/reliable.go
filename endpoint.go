@@ -34,15 +34,17 @@ type ProcessPacketFunction func(id uint64, sequence uint16, packetData []byte) b
 
 // Config configures an Endpoint.
 //
-// Peers must agree on FragmentSize, and MaxFragments must be compatible on
-// both sides: the sender uses MaxFragments to bound how many fragments it
-// emits per packet, while the receiver uses its own value to reject fragment
-// counts above that limit. A packet larger than MaxFragments*FragmentSize
-// cannot be reassembled by a peer whose limit is smaller.
+// Peers must agree on FragmentSize and use compatible MaxFragments limits.
+// The sender splits a fragmented packet into len(packetData)/FragmentSize
+// fragments rounded up, at most MaxPacketSize/FragmentSize rounded up. The
+// receiver rejects counts above its own MaxFragments and checks payload sizes
+// against its own FragmentSize: non-final fragments must match it exactly,
+// and the final fragment must not exceed it.
 //
-// SentPacketsBufferSize and ReceivedPacketsBufferSize are also the sample
-// windows for the stats calculated by Update. Buffer sizes less than 4 yield
-// no loss or bandwidth samples.
+// Update samples the oldest half of each packet buffer. SentPacketsBufferSize
+// less than 2 yields no packet loss sample. A buffer size less than 4 yields
+// no sample for the bandwidth figures it feeds: SentPacketsBufferSize feeds
+// sent and acked bandwidth; ReceivedPacketsBufferSize feeds received bandwidth.
 type Config struct {
 	Name                      string // name of the endpoint. used in log output
 	ID                        uint64 // id of the endpoint. passed to callbacks so shared callbacks can tell endpoints apart
@@ -53,10 +55,10 @@ type Config struct {
 	AckBufferSize             int    // maximum number of acks buffered between calls to Endpoint.ClearAcks
 	SentPacketsBufferSize     int    // number of sent packets tracked for acks, packet loss and bandwidth stats
 	ReceivedPacketsBufferSize int    // number of received packets tracked. also the window for stale and duplicate packet rejection
-	// FragmentReassemblyBufferSize is the number of packets that can be under
-	// reassembly from fragments at the same time. It bounds per-endpoint
-	// reassembly memory to
-	// FragmentReassemblyBufferSize * (9 + MaxFragments * FragmentSize) bytes.
+	// FragmentReassemblyBufferSize sets the reassembly window, rounded up to a
+	// power of two. It bounds the per-endpoint reassembly packet buffers to
+	// N * (9 + MaxFragments * FragmentSize) bytes,
+	// where N is FragmentReassemblyBufferSize rounded up to a power of two.
 	FragmentReassemblyBufferSize int
 	RTTSmoothingFactor           float64                // exponential smoothing factor for the rtt moving average
 	RTTHistorySize               int                    // number of rtt samples kept for min/max/avg rtt and jitter

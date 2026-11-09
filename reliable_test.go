@@ -1,6 +1,7 @@
 package reliable
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -1038,4 +1039,176 @@ func TestEndpointReset(t *testing.T) {
 	if context.receiver.Counters()[CounterNumPacketsReceived] == 0 {
 		t.Fatal("expected receiver to have received packets after reset")
 	}
+}
+
+func requireStatClose(t *testing.T, name string, got, want float64) {
+	t.Helper()
+	const tolerance = 1e-6
+	if math.Abs(got-want) > tolerance {
+		t.Fatalf("%s: expected %.6f, got %.6f", name, want, got)
+	}
+}
+
+func TestStatsInitialValues(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	newTestEndpointPair(t, context, time, nil)
+
+	stats := []struct {
+		name string
+		got  float64
+	}{
+		{"RTT", context.sender.RTT()},
+		{"RTTMin", context.sender.RTTMin()},
+		{"RTTMax", context.sender.RTTMax()},
+		{"RTTAvg", context.sender.RTTAvg()},
+		{"JitterAvgVsMinRTT", context.sender.JitterAvgVsMinRTT()},
+		{"JitterMaxVsMinRTT", context.sender.JitterMaxVsMinRTT()},
+		{"JitterStddevVsAvgRTT", context.sender.JitterStddevVsAvgRTT()},
+		{"PacketLoss", context.sender.PacketLoss()},
+	}
+
+	for _, stat := range stats {
+		requireStatClose(t, stat.name, stat.got, 0.0)
+	}
+
+	sentBandwidthKbps, receivedBandwidthKbps, ackedBandwidthKbps := context.sender.Bandwidth()
+	requireStatClose(t, "SentBandwidthKBPS", sentBandwidthKbps, 0.0)
+	requireStatClose(t, "ReceivedBandwidthKBPS", receivedBandwidthKbps, 0.0)
+	requireStatClose(t, "AckedBandwidthKBPS", ackedBandwidthKbps, 0.0)
+}
+
+func TestRTTAndJitterStats(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+		senderConfig.RTTHistorySize = 8
+		senderConfig.RTTSmoothingFactor = 0.5
+	})
+
+	// send one packet per sample and ack it after a known delay, so the rtt
+	// history buffer contains exactly 20, 40, 60 and 80 milliseconds.
+
+	delays := []float64{20.0, 40.0, 60.0, 80.0}
+	for _, delay := range delays {
+		context.sender.Update(time)
+		context.sender.SendPacket(make([]byte, 8))
+
+		ackTime := time + delay/1000.0
+
+		context.sender.Update(ackTime)
+		context.receiver.Update(ackTime)
+		context.receiver.SendPacket(make([]byte, 8))
+
+		context.sender.ClearAcks()
+		context.receiver.ClearAcks()
+
+		time = ackTime
+	}
+
+	context.sender.Update(time)
+
+	// 20, then 20+(40-20)*0.5, 30+(60-30)*0.5, 45+(80-45)*0.5.
+
+	requireStatClose(t, "RTT", context.sender.RTT(), 62.5)
+	requireStatClose(t, "RTTMin", context.sender.RTTMin(), 20.0)
+	requireStatClose(t, "RTTMax", context.sender.RTTMax(), 80.0)
+	requireStatClose(t, "RTTAvg", context.sender.RTTAvg(), 50.0)
+	requireStatClose(t, "JitterAvgVsMinRTT", context.sender.JitterAvgVsMinRTT(), 30.0)
+	requireStatClose(t, "JitterMaxVsMinRTT", context.sender.JitterMaxVsMinRTT(), 60.0)
+	requireStatClose(t, "JitterStddevVsAvgRTT", context.sender.JitterStddevVsAvgRTT(), math.Sqrt(500.0))
+}
+
+func TestPacketLossStats(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+		senderConfig.SentPacketsBufferSize = 16
+		senderConfig.PacketLossSmoothingFactor = 1.0
+	})
+
+	// send 16 packets, dropping every fourth. the sampled window is the first
+	// half of the sent buffer, sequences 0..7, which drops packets 0 and 4:
+	// two lost out of eight sent is 25%.
+
+	for i := 0; i < 16; i++ {
+		context.drop = i%4 == 0
+
+		context.sender.Update(time)
+		context.receiver.Update(time)
+		context.sender.SendPacket(make([]byte, 8))
+
+		time += 0.01
+	}
+
+	context.drop = false
+	context.receiver.Update(time)
+	context.receiver.SendPacket(make([]byte, 8))
+	context.sender.Update(time)
+
+	requireStatClose(t, "PacketLoss", context.sender.PacketLoss(), 25.0)
+}
+
+func TestBandwidthStats(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	packetHeaderSize := 0
+
+	newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+		senderConfig.SentPacketsBufferSize = 16
+		receiverConfig.ReceivedPacketsBufferSize = 16
+		senderConfig.BandwidthSmoothingFactor = 1.0
+		receiverConfig.BandwidthSmoothingFactor = 1.0
+		packetHeaderSize = senderConfig.PacketHeaderSize
+	})
+
+	const (
+		payloadBytes = 8
+		// the receiver sends nothing until the end, so every sender packet
+		// header is a 1 byte prefix, 2 byte sequence, 1 byte ack offset and
+		// 4 bytes of ack bits.
+		senderWireHeaderBytes = 8
+	)
+
+	sentPacketBytes := packetHeaderSize + payloadBytes
+	receivedPacketBytes := packetHeaderSize + senderWireHeaderBytes + payloadBytes
+
+	// send 16 packets at 10ms intervals, dropping packets 0 and 5. the
+	// sampled window is sequences 0..7, so sent bandwidth covers all eight
+	// packets over 70ms, while received and acked bandwidth cover the six
+	// delivered packets 1, 2, 3, 4, 6 and 7 over 60ms.
+
+	for i := 0; i < 16; i++ {
+		context.drop = i == 0 || i == 5
+
+		context.sender.Update(time)
+		context.receiver.Update(time)
+		context.sender.SendPacket(make([]byte, payloadBytes))
+
+		time += 0.01
+	}
+
+	context.drop = false
+	context.receiver.Update(time)
+	context.receiver.SendPacket(make([]byte, payloadBytes))
+	context.sender.Update(time)
+
+	sentBandwidthKbps, _, ackedBandwidthKbps := context.sender.Bandwidth()
+	_, receivedBandwidthKbps, _ := context.receiver.Bandwidth()
+
+	expectedSentBandwidthKbps := float64(8*sentPacketBytes) * 8.0 / 1000.0 / 0.07
+	expectedReceivedBandwidthKbps := float64(6*receivedPacketBytes) * 8.0 / 1000.0 / 0.06
+	expectedAckedBandwidthKbps := float64(6*sentPacketBytes) * 8.0 / 1000.0 / 0.06
+
+	requireStatClose(t, "SentBandwidthKBPS", sentBandwidthKbps, expectedSentBandwidthKbps)
+	requireStatClose(t, "ReceivedBandwidthKBPS", receivedBandwidthKbps, expectedReceivedBandwidthKbps)
+	requireStatClose(t, "AckedBandwidthKBPS", ackedBandwidthKbps, expectedAckedBandwidthKbps)
 }

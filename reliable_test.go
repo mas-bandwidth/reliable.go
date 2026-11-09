@@ -5,6 +5,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -693,6 +694,42 @@ func TestLoggingPacketExchange(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSetPrintfFunctionConcurrentWithPacketExchange(t *testing.T) {
+	SetLogLevel(LogLevelDebug)
+	SetPrintfFunction(func(format string, args ...any) {})
+	t.Cleanup(func() {
+		SetLogLevel(LogLevelNone)
+		SetPrintfFunction(func(format string, args ...any) {
+			fmt.Printf(format, args...)
+		})
+	})
+
+	context := newTestContext()
+	newTestEndpointPair(t, context, 100.0, nil)
+
+	const iterations = 2000
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			SetPrintfFunction(func(format string, args ...any) {})
+			SetLogLevel(LogLevelDebug)
+		}
+	}()
+
+	dummyPacket := make([]byte, 8)
+	for i := 0; i < iterations; i++ {
+		time := 100.0 + float64(i)*0.01
+		context.sender.SendPacket(dummyPacket)
+		context.receiver.SendPacket(dummyPacket)
+		context.sender.Update(time)
+		context.receiver.Update(time)
+	}
+	wg.Wait()
 }
 
 const testDuplicatePacketsNumIterations = 16

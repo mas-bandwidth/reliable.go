@@ -378,6 +378,71 @@ func TestNewEndpointBufferSizeValidation(t *testing.T) {
 	}
 }
 
+func TestNewEndpointSmoothingFactorRangeValidation(t *testing.T) {
+	factors := []struct {
+		name   string
+		modify func(*Config, float64)
+	}{
+		{
+			name: "rtt smoothing factor",
+			modify: func(config *Config, value float64) {
+				config.RTTSmoothingFactor = value
+			},
+		},
+		{
+			name: "packet loss smoothing factor",
+			modify: func(config *Config, value float64) {
+				config.PacketLossSmoothingFactor = value
+			},
+		},
+		{
+			name: "bandwidth smoothing factor",
+			modify: func(config *Config, value float64) {
+				config.BandwidthSmoothingFactor = value
+			},
+		},
+	}
+
+	invalidValues := []struct {
+		name  string
+		value float64
+	}{
+		{name: "negative", value: -0.1},
+		{name: "above one", value: 1.1},
+		{name: "not a number", value: math.NaN()},
+	}
+
+	for _, factor := range factors {
+		for _, invalid := range invalidValues {
+			t.Run(factor.name+" rejects "+invalid.name, func(t *testing.T) {
+				config := endpointConfigForValidation()
+				factor.modify(&config, invalid.value)
+				endpoint, err := NewEndpoint(&config, 0)
+				if err == nil {
+					if endpoint != nil {
+						t.Fatal("expected out of range smoothing factor to be refused")
+					}
+					t.Fatal("expected smoothing factor range error")
+				}
+			})
+		}
+
+		for _, validValue := range []float64{0.0, 1.0} {
+			t.Run(factor.name+" accepts "+strconv.FormatFloat(validValue, 'g', -1, 64), func(t *testing.T) {
+				config := endpointConfigForValidation()
+				factor.modify(&config, validValue)
+				endpoint, err := NewEndpoint(&config, 0)
+				if err != nil {
+					t.Fatalf("valid smoothing factor %v was refused: %v", validValue, err)
+				}
+				if endpoint == nil {
+					t.Fatalf("expected endpoint for valid smoothing factor %v", validValue)
+				}
+			})
+		}
+	}
+}
+
 // newTestEndpointPair creates a connected sender/receiver pair with the given
 // config modifications applied to both endpoints.
 func newTestEndpointPair(t *testing.T, context *testContext, time float64, modifyConfig func(senderConfig, receiverConfig *Config)) {

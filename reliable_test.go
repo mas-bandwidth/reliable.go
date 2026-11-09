@@ -1,6 +1,7 @@
 package reliable
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"strconv"
@@ -1905,4 +1906,546 @@ func TestPacketsAcrossSequenceWrap(t *testing.T) {
 	t.Run("255", func(t *testing.T) {
 		testPacketsAcrossSequenceWrap(t, 255)
 	})
+}
+
+func TestRTT(t *testing.T) {
+	time := 1000.0
+	const deltaTime = 0.25
+	const replyDelay = 0.0625
+
+	context := newTestContext()
+	newTestEndpointPair(t, context, time, nil)
+
+	packet := make([]byte, 8)
+	for i := 0; i < 1000; i++ {
+		context.sender.Update(time)
+		context.receiver.Update(time)
+
+		context.sender.SendPacket(packet)
+
+		context.sender.Update(time + replyDelay)
+		context.receiver.Update(time + replyDelay)
+
+		context.receiver.SendPacket(packet)
+
+		context.sender.ClearAcks()
+		context.receiver.ClearAcks()
+
+		time += deltaTime
+	}
+
+	context.sender.Update(time)
+	context.receiver.Update(time)
+
+	// the sender's packets are acked replyDelay after they are sent: 62.5 ms
+
+	if rtt := context.sender.RTT(); math.Abs(rtt-62.5) > 1e-3 {
+		t.Fatalf("expected sender rtt 62.5ms, got %f", rtt)
+	}
+	if rtt := context.sender.RTTMin(); math.Abs(rtt-62.5) > 1e-3 {
+		t.Fatalf("expected sender rtt min 62.5ms, got %f", rtt)
+	}
+	if rtt := context.sender.RTTMax(); math.Abs(rtt-62.5) > 1e-3 {
+		t.Fatalf("expected sender rtt max 62.5ms, got %f", rtt)
+	}
+	if rtt := context.sender.RTTAvg(); math.Abs(rtt-62.5) > 1e-3 {
+		t.Fatalf("expected sender rtt avg 62.5ms, got %f", rtt)
+	}
+	if jitter := context.sender.JitterAvgVsMinRTT(); math.Abs(jitter) > 1e-3 {
+		t.Fatalf("expected sender average jitter 0ms, got %f", jitter)
+	}
+	if jitter := context.sender.JitterMaxVsMinRTT(); math.Abs(jitter) > 1e-3 {
+		t.Fatalf("expected sender max jitter 0ms, got %f", jitter)
+	}
+	if jitter := context.sender.JitterStddevVsAvgRTT(); math.Abs(jitter) > 1e-3 {
+		t.Fatalf("expected sender stddev jitter 0ms, got %f", jitter)
+	}
+
+	// the receiver's replies are acked by the sender's next packet: 250 - 62.5 = 187.5 ms
+
+	if rtt := context.receiver.RTT(); math.Abs(rtt-187.5) > 1e-3 {
+		t.Fatalf("expected receiver rtt 187.5ms, got %f", rtt)
+	}
+	if rtt := context.receiver.RTTMin(); math.Abs(rtt-187.5) > 1e-3 {
+		t.Fatalf("expected receiver rtt min 187.5ms, got %f", rtt)
+	}
+	if rtt := context.receiver.RTTMax(); math.Abs(rtt-187.5) > 1e-3 {
+		t.Fatalf("expected receiver rtt max 187.5ms, got %f", rtt)
+	}
+	if rtt := context.receiver.RTTAvg(); math.Abs(rtt-187.5) > 1e-3 {
+		t.Fatalf("expected receiver rtt avg 187.5ms, got %f", rtt)
+	}
+}
+
+const (
+	testSequenceWrapNumPackets     = 65536 + 8
+	testSequenceWrapUpdateInterval = 1024
+)
+
+func TestSequenceWrap(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	senderProcessed := 0
+	receiverProcessed := 0
+
+	newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+		senderConfig.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+			if id != 0 {
+				t.Fatalf("expected sender id 0, got %d", id)
+			}
+			senderProcessed++
+			return true
+		}
+		receiverConfig.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+			if id != 1 {
+				t.Fatalf("expected receiver id 1, got %d", id)
+			}
+			receiverProcessed++
+			return true
+		}
+	})
+
+	var senderAcked [65536]bool
+	var receiverAcked [65536]bool
+
+	dummyPacket := make([]byte, 8)
+
+	for i := 0; i < testSequenceWrapNumPackets; i++ {
+		context.sender.SendPacket(dummyPacket)
+		context.receiver.SendPacket(dummyPacket)
+
+		for _, ack := range context.sender.Acks() {
+			senderAcked[ack] = true
+		}
+		for _, ack := range context.receiver.Acks() {
+			receiverAcked[ack] = true
+		}
+
+		context.sender.ClearAcks()
+		context.receiver.ClearAcks()
+
+		if i%testSequenceWrapUpdateInterval == 0 {
+			context.sender.Update(time)
+			context.receiver.Update(time)
+			time += 0.01
+		}
+	}
+
+	context.sender.Update(time)
+	context.receiver.Update(time)
+
+	expectedSequence := uint16(testSequenceWrapNumPackets % 65536)
+	if sequence := context.sender.NextPacketSequence(); sequence != expectedSequence {
+		t.Fatalf("expected sender next sequence %d after wrap, got %d", expectedSequence, sequence)
+	}
+	if sequence := context.receiver.NextPacketSequence(); sequence != expectedSequence {
+		t.Fatalf("expected receiver next sequence %d after wrap, got %d", expectedSequence, sequence)
+	}
+
+	// every sequence number up to and including 65535 must be acked on both sides
+
+	for sequence := 0; sequence < 65536; sequence++ {
+		if !senderAcked[sequence] {
+			t.Fatalf("expected sender packet %d to be acked across the sequence wrap", sequence)
+		}
+		if !receiverAcked[sequence] {
+			t.Fatalf("expected receiver packet %d to be acked across the sequence wrap", sequence)
+		}
+	}
+
+	if senderProcessed != testSequenceWrapNumPackets {
+		t.Fatalf("expected sender to process %d packets, got %d", testSequenceWrapNumPackets, senderProcessed)
+	}
+	if receiverProcessed != testSequenceWrapNumPackets {
+		t.Fatalf("expected receiver to process %d packets, got %d", testSequenceWrapNumPackets, receiverProcessed)
+	}
+
+	senderCounters := context.sender.Counters()
+	receiverCounters := context.receiver.Counters()
+
+	if senderCounters[CounterNumPacketsSent] != testSequenceWrapNumPackets {
+		t.Fatalf("expected sender to send %d packets, got %d", testSequenceWrapNumPackets, senderCounters[CounterNumPacketsSent])
+	}
+	if receiverCounters[CounterNumPacketsSent] != testSequenceWrapNumPackets {
+		t.Fatalf("expected receiver to send %d packets, got %d", testSequenceWrapNumPackets, receiverCounters[CounterNumPacketsSent])
+	}
+	if senderCounters[CounterNumPacketsReceived] != testSequenceWrapNumPackets {
+		t.Fatalf("expected sender to receive %d packets, got %d", testSequenceWrapNumPackets, senderCounters[CounterNumPacketsReceived])
+	}
+	if receiverCounters[CounterNumPacketsReceived] != testSequenceWrapNumPackets {
+		t.Fatalf("expected receiver to receive %d packets, got %d", testSequenceWrapNumPackets, receiverCounters[CounterNumPacketsReceived])
+	}
+	if senderCounters[CounterNumPacketsStale] != 0 || receiverCounters[CounterNumPacketsStale] != 0 {
+		t.Fatalf("expected no stale packets across the sequence wrap, got sender %d receiver %d",
+			senderCounters[CounterNumPacketsStale], receiverCounters[CounterNumPacketsStale])
+	}
+	if senderCounters[CounterNumPacketsDuplicate] != 0 || receiverCounters[CounterNumPacketsDuplicate] != 0 {
+		t.Fatalf("expected no duplicate packets across the sequence wrap, got sender %d receiver %d",
+			senderCounters[CounterNumPacketsDuplicate], receiverCounters[CounterNumPacketsDuplicate])
+	}
+}
+
+const (
+	testFragmentCountsFragmentSize = 256
+	testFragmentCountsMaxFragments = 256
+)
+
+func testFragmentCase(t *testing.T, fragmentSize int, maxFragments int, packetBytes int, expectedFragments int) {
+	t.Helper()
+
+	var sender *Endpoint
+	var receiver *Endpoint
+	numProcessed := 0
+	processedBytes := 0
+	var processed []byte
+
+	transmit := func(id uint64, sequence uint16, packetData []byte) {
+		if id == 0 {
+			receiver.ReceivePacket(packetData)
+		} else {
+			sender.ReceivePacket(packetData)
+		}
+	}
+	process := func(id uint64, sequence uint16, packetData []byte) bool {
+		numProcessed++
+		processedBytes = len(packetData)
+		processed = append([]byte(nil), packetData...)
+		return true
+	}
+
+	senderConfig := DefaultConfig()
+	senderConfig.FragmentSize = fragmentSize
+	senderConfig.MaxFragments = maxFragments
+	senderConfig.MaxPacketSize = fragmentSize * maxFragments
+	senderConfig.FragmentAbove = fragmentSize
+	receiverConfig := senderConfig
+
+	senderConfig.Name = "sender"
+	senderConfig.ID = 0
+	senderConfig.TransmitPacketFunction = transmit
+	senderConfig.ProcessPacketFunction = process
+
+	receiverConfig.Name = "receiver"
+	receiverConfig.ID = 1
+	receiverConfig.TransmitPacketFunction = transmit
+	receiverConfig.ProcessPacketFunction = process
+
+	var err error
+	sender, err = NewEndpoint(&senderConfig, 100.0)
+	if err != nil {
+		t.Fatalf("could not create sender endpoint: %v", err)
+	}
+	receiver, err = NewEndpoint(&receiverConfig, 100.0)
+	if err != nil {
+		t.Fatalf("could not create receiver endpoint: %v", err)
+	}
+
+	packet := make([]byte, packetBytes)
+	for i := 0; i < packetBytes; i++ {
+		packet[i] = byte((i * 31) + 7)
+	}
+
+	sender.SendPacket(packet)
+
+	if numProcessed != 1 {
+		t.Fatalf("expected 1 packet processed, got %d", numProcessed)
+	}
+	if processedBytes != packetBytes {
+		t.Fatalf("expected %d processed bytes, got %d", packetBytes, processedBytes)
+	}
+	if !bytes.Equal(processed, packet) {
+		t.Fatal("processed packet data does not match sent packet")
+	}
+
+	fragmentsSent := sender.Counters()[CounterNumFragmentsSent]
+	fragmentsReceived := receiver.Counters()[CounterNumFragmentsReceived]
+
+	if expectedFragments == 0 {
+		if fragmentsSent != 0 {
+			t.Fatalf("expected 0 fragments sent, got %d", fragmentsSent)
+		}
+		if fragmentsReceived != 0 {
+			t.Fatalf("expected 0 fragments received, got %d", fragmentsReceived)
+		}
+	} else {
+		if fragmentsSent != uint64(expectedFragments) {
+			t.Fatalf("expected %d fragments sent, got %d", expectedFragments, fragmentsSent)
+		}
+		if fragmentsReceived != uint64(expectedFragments) {
+			t.Fatalf("expected %d fragments received, got %d", expectedFragments, fragmentsReceived)
+		}
+	}
+}
+
+func TestFragmentCounts(t *testing.T) {
+	// an exact multiple of the fragment size, where the last fragment is full rather than a remainder
+	testFragmentCase(t, 512, 16, 512*4, 4)
+
+	// the largest packet the config allows, again an exact multiple
+	testFragmentCase(t, 512, 16, 512*16, 16)
+
+	// one fragment: above the threshold by a single byte
+	testFragmentCase(t, 512, 16, 513, 2)
+	testFragmentCase(t, 512, 16, 1023, 2)
+	testFragmentCase(t, 512, 16, 1025, 3)
+	testFragmentCase(t, 64, 256, 65, 2)
+
+	// 256 fragments, the maximum the wire format can express
+	testFragmentCase(t, 64, 256, 64*256, 256)
+	testFragmentCase(t, 64, 256, 64*255+1, 256)
+
+	// at or below the threshold the packet is not fragmented
+	testFragmentCase(t, 512, 16, 512, 0)
+	testFragmentCase(t, 512, 16, 1, 0)
+}
+
+func TestTruncatedPackets(t *testing.T) {
+	var captured [][]byte
+	numProcessed := 0
+
+	config := DefaultConfig()
+	config.FragmentSize = 256
+	config.MaxFragments = 16
+	config.MaxPacketSize = 256 * 16
+	config.FragmentAbove = 256
+	config.ID = 0
+	config.TransmitPacketFunction = func(id uint64, sequence uint16, packetData []byte) {
+		captured = append(captured, append([]byte(nil), packetData...))
+	}
+	config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+		numProcessed++
+		return true
+	}
+
+	sender, err := NewEndpoint(&config, 100.0)
+	if err != nil {
+		t.Fatalf("could not create sender endpoint: %v", err)
+	}
+	receiver, err := NewEndpoint(&config, 100.0)
+	if err != nil {
+		t.Fatalf("could not create receiver endpoint: %v", err)
+	}
+
+	// an unfragmented packet, captured on the wire
+
+	packet := bytes.Repeat([]byte{0xAB}, 200)
+	sender.SendPacket(packet)
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 captured packet, got %d", len(captured))
+	}
+
+	wholePacket := captured[0]
+
+	// every truncation of it shorter than the header is rejected, and none is processed
+
+	for truncatedBytes := 1; truncatedBytes < 4; truncatedBytes++ {
+		receiver.ReceivePacket(wholePacket[:truncatedBytes])
+	}
+
+	if got := receiver.Counters()[CounterNumPacketsInvalid]; got != 3 {
+		t.Fatalf("expected 3 invalid packets, got %d", got)
+	}
+	if numProcessed != 0 {
+		t.Fatalf("expected 0 processed packets, got %d", numProcessed)
+	}
+
+	// the whole packet still arrives
+
+	receiver.ReceivePacket(wholePacket)
+	if numProcessed != 1 {
+		t.Fatalf("expected 1 processed packet, got %d", numProcessed)
+	}
+
+	// now a fragmented packet
+
+	captured = nil
+
+	largePacket := bytes.Repeat([]byte{0xCD}, 1024)
+	sender.SendPacket(largePacket)
+	if len(captured) != 4 {
+		t.Fatalf("expected 4 captured fragments, got %d", len(captured))
+	}
+
+	// a fragment truncated inside its header is rejected
+
+	for truncatedBytes := 1; truncatedBytes < FragmentHeaderBytes; truncatedBytes++ {
+		receiver.ReceivePacket(captured[1][:truncatedBytes])
+	}
+
+	if got := receiver.Counters()[CounterNumFragmentsReceived]; got != 0 {
+		t.Fatalf("expected 0 fragments received, got %d", got)
+	}
+	if got := receiver.Counters()[CounterNumFragmentsInvalid]; got != uint64(FragmentHeaderBytes-1) {
+		t.Fatalf("expected %d invalid fragments, got %d", FragmentHeaderBytes-1, got)
+	}
+
+	// a fragment that is not the last one must carry exactly fragment_size bytes, so a
+	// truncated body is rejected too
+
+	receiver.ReceivePacket(captured[1][:len(captured[1])-1])
+	if got := receiver.Counters()[CounterNumFragmentsReceived]; got != 0 {
+		t.Fatalf("expected 0 fragments received after short body, got %d", got)
+	}
+	if got := receiver.Counters()[CounterNumFragmentsInvalid]; got != uint64(FragmentHeaderBytes) {
+		t.Fatalf("expected %d invalid fragments after short body, got %d", FragmentHeaderBytes, got)
+	}
+	if numProcessed != 1 {
+		t.Fatalf("expected 1 processed packet before reassembly, got %d", numProcessed)
+	}
+
+	// the intact fragments reassemble
+
+	for i := range captured {
+		receiver.ReceivePacket(captured[i])
+	}
+
+	if got := receiver.Counters()[CounterNumFragmentsReceived]; got != 4 {
+		t.Fatalf("expected 4 fragments received, got %d", got)
+	}
+	if numProcessed != 2 {
+		t.Fatalf("expected 2 processed packets after reassembly, got %d", numProcessed)
+	}
+}
+
+func TestNewEndpointInvalidConfig(t *testing.T) {
+	t.Run("nil config", func(t *testing.T) {
+		endpoint, err := NewEndpoint(nil, 0)
+		if err == nil {
+			t.Fatal("expected nil config to be refused")
+		}
+		if endpoint != nil {
+			t.Fatal("expected no endpoint for nil config")
+		}
+		if !strings.Contains(err.Error(), "config must not be nil") {
+			t.Fatalf("expected nil config error, got %q", err)
+		}
+	})
+
+	t.Run("zero value config", func(t *testing.T) {
+		var config Config
+		endpoint, err := NewEndpoint(&config, 0)
+		if err == nil {
+			t.Fatal("expected zero value config to be refused")
+		}
+		if endpoint != nil {
+			t.Fatal("expected no endpoint for zero value config")
+		}
+		if !strings.Contains(err.Error(), "max packet size must be positive") {
+			t.Fatalf("expected zero value config error, got %q", err)
+		}
+	})
+
+	tests := []struct {
+		name    string
+		wantErr string
+		modify  func(*Config)
+	}{
+		{
+			name:    "zero max packet size",
+			wantErr: "max packet size must be positive",
+			modify: func(config *Config) {
+				config.MaxPacketSize = 0
+			},
+		},
+		{
+			name:    "zero fragment above",
+			wantErr: "fragment above must be positive",
+			modify: func(config *Config) {
+				config.FragmentAbove = 0
+			},
+		},
+		{
+			name:    "zero max fragments",
+			wantErr: "max fragments must be in [1,256]",
+			modify: func(config *Config) {
+				config.MaxFragments = 0
+			},
+		},
+		{
+			name:    "max fragments above 256",
+			wantErr: "max fragments must be in [1,256]",
+			modify: func(config *Config) {
+				config.MaxFragments = 257
+			},
+		},
+		{
+			name:    "zero fragment size",
+			wantErr: "fragment size must be positive",
+			modify: func(config *Config) {
+				config.FragmentSize = 0
+			},
+		},
+		{
+			name:    "zero ack buffer size",
+			wantErr: "ack buffer size must be positive",
+			modify: func(config *Config) {
+				config.AckBufferSize = 0
+			},
+		},
+		{
+			name:    "zero sent packets buffer size",
+			wantErr: "sent packets buffer size must be in [1,16384]",
+			modify: func(config *Config) {
+				config.SentPacketsBufferSize = 0
+			},
+		},
+		{
+			name:    "zero received packets buffer size",
+			wantErr: "received packets buffer size must be in [1,16384]",
+			modify: func(config *Config) {
+				config.ReceivedPacketsBufferSize = 0
+			},
+		},
+		{
+			name:    "zero fragment reassembly buffer size",
+			wantErr: "fragment reassembly buffer size must be in [1,16384]",
+			modify: func(config *Config) {
+				config.FragmentReassemblyBufferSize = 0
+			},
+		},
+		{
+			name:    "zero rtt history size",
+			wantErr: "rtt history size must be positive",
+			modify: func(config *Config) {
+				config.RTTHistorySize = 0
+			},
+		},
+		{
+			name:    "nil transmit packet function",
+			wantErr: "transmit packet function must not be nil",
+			modify: func(config *Config) {
+				config.TransmitPacketFunction = nil
+			},
+		},
+		{
+			name:    "nil process packet function",
+			wantErr: "process packet function must not be nil",
+			modify: func(config *Config) {
+				config.ProcessPacketFunction = nil
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := endpointConfigForValidation()
+			test.modify(&config)
+
+			endpoint, err := NewEndpoint(&config, 0)
+			if err == nil {
+				if endpoint != nil {
+					t.Fatal("expected invalid config to be refused")
+				}
+				t.Fatal("expected invalid config error")
+			}
+			if endpoint != nil {
+				t.Fatal("expected no endpoint for invalid config")
+			}
+			if !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("expected error containing %q, got %q", test.wantErr, err)
+			}
+		})
+	}
 }

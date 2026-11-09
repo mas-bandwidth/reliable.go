@@ -1595,6 +1595,39 @@ func TestRTTAndJitterStats(t *testing.T) {
 	requireStatClose(t, "JitterStddevVsAvgRTT", context.sender.JitterStddevVsAvgRTT(), math.Sqrt(500.0))
 }
 
+func TestRTTMinLarge(t *testing.T) {
+	for _, sample := range []float64{9000.0, 10000.0, 12000.0} {
+		t.Run(fmt.Sprintf("%.0fms", sample), func(t *testing.T) {
+			time := 100.0
+
+			context := newTestContext()
+
+			newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+				senderConfig.RTTHistorySize = 8
+			})
+
+			context.sender.Update(time)
+			context.sender.SendPacket(make([]byte, 8))
+
+			ackTime := time + sample/1000.0
+
+			context.sender.Update(ackTime)
+			context.receiver.Update(ackTime)
+			context.receiver.SendPacket(make([]byte, 8))
+
+			context.sender.ClearAcks()
+			context.receiver.ClearAcks()
+
+			context.sender.Update(ackTime)
+
+			requireStatClose(t, "RTTMin", context.sender.RTTMin(), sample)
+			requireStatClose(t, "RTTMax", context.sender.RTTMax(), sample)
+			requireStatClose(t, "RTTAvg", context.sender.RTTAvg(), sample)
+			requireStatClose(t, "JitterAvgVsMinRTT", context.sender.JitterAvgVsMinRTT(), 0.0)
+		})
+	}
+}
+
 func TestPacketLossStats(t *testing.T) {
 	time := 100.0
 

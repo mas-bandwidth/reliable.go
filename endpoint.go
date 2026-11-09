@@ -232,8 +232,10 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 	}
 
 	if packetBytes > endpoint.config.MaxPacketSize {
-		logPrintf(LogLevelError, "[%s] packet too large to send. packet is %d bytes, maximum is %d\n",
-			endpoint.config.Name, packetBytes, endpoint.config.MaxPacketSize)
+		if errorLogging() {
+			logPrintf(LogLevelError, "[%s] packet too large to send. packet is %d bytes, maximum is %d\n",
+				endpoint.config.Name, packetBytes, endpoint.config.MaxPacketSize)
+		}
 		endpoint.counters[CounterNumPacketsTooLargeToSend]++
 		return
 	}
@@ -403,8 +405,10 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 		packetPayloadBytes := packetBytes - packetHeaderBytes
 
 		if packetPayloadBytes > endpoint.config.MaxPacketSize {
-			logPrintf(LogLevelError, "[%s] packet too large to receive. packet is at %d bytes, maximum is %d\n",
-				endpoint.config.Name, packetPayloadBytes, endpoint.config.MaxPacketSize)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] packet too large to receive. packet is at %d bytes, maximum is %d\n",
+					endpoint.config.Name, packetPayloadBytes, endpoint.config.MaxPacketSize)
+			}
 			endpoint.counters[CounterNumPacketsTooLargeToReceive]++
 			return
 		}
@@ -468,15 +472,19 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 								endpoint.rtt += (rtt - endpoint.rtt) * endpoint.config.RTTSmoothingFactor
 							}
 						} else {
-							logPrintf(LogLevelError, "[%s] ack buffer is full. dropped ack for packet %d. make sure you call Endpoint.ClearAcks\n",
-								endpoint.config.Name, ackSequence)
+							if errorLogging() {
+								logPrintf(LogLevelError, "[%s] ack buffer is full. dropped ack for packet %d. make sure you call Endpoint.ClearAcks\n",
+									endpoint.config.Name, ackSequence)
+							}
 						}
 					}
 				}
 				ackBits >>= 1
 			}
 		} else {
-			logPrintf(LogLevelError, "[%s] process packet failed\n", endpoint.config.Name)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] process packet failed\n", endpoint.config.Name)
+			}
 		}
 	} else {
 		// fragment packet
@@ -505,7 +513,9 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 			reassemblyData = endpoint.fragmentReassembly.insertWithCleanup(sequence, fragmentReassemblyCleanup)
 
 			if reassemblyData == nil {
-				logPrintf(LogLevelError, "[%s] ignoring invalid fragment. could not insert in reassembly buffer (stale)\n", endpoint.config.Name)
+				if debugLogging() {
+					logPrintf(LogLevelDebug, "[%s] ignoring invalid fragment. could not insert in reassembly buffer (stale)\n", endpoint.config.Name)
+				}
 				endpoint.counters[CounterNumFragmentsInvalid]++
 				return
 			}
@@ -523,15 +533,19 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 		}
 
 		if numFragments != reassemblyData.numFragmentsTotal {
-			logPrintf(LogLevelError, "[%s] ignoring invalid fragment. fragment count mismatch. expected %d, got %d\n",
-				endpoint.config.Name, reassemblyData.numFragmentsTotal, numFragments)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] ignoring invalid fragment. fragment count mismatch. expected %d, got %d\n",
+					endpoint.config.Name, reassemblyData.numFragmentsTotal, numFragments)
+			}
 			endpoint.counters[CounterNumFragmentsInvalid]++
 			return
 		}
 
 		if reassemblyData.fragmentReceived[fragmentID] {
-			logPrintf(LogLevelError, "[%s] ignoring fragment %d of packet %d. fragment already received\n",
-				endpoint.config.Name, fragmentID, sequence)
+			if debugLogging() {
+				logPrintf(LogLevelDebug, "[%s] ignoring fragment %d of packet %d. fragment already received\n",
+					endpoint.config.Name, fragmentID, sequence)
+			}
 			return
 		}
 

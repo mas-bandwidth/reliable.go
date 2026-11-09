@@ -1409,6 +1409,40 @@ func TestBandwidthStats(t *testing.T) {
 	requireStatClose(t, "AckedBandwidthKBPS", ackedBandwidthKbps, expectedAckedBandwidthKbps)
 }
 
+func TestBandwidthLargeSampleTotals(t *testing.T) {
+	const packetBytes uint32 = 1<<30 - 1
+	context := newTestContext()
+	newTestEndpointPair(t, context, 1000.0, func(senderConfig, receiverConfig *Config) {
+		senderConfig.SentPacketsBufferSize = 8
+		senderConfig.ReceivedPacketsBufferSize = 8
+		senderConfig.BandwidthSmoothingFactor = 1.0
+	})
+	endpoint := context.sender
+	// Populate only packet metadata: each length fits a signed 32-bit value,
+	// while the four sampled lengths together require a wider accumulator.
+	for i := 0; i < 8; i++ {
+		*endpoint.sentPackets.insert(uint16(i)) = sentPacketData{
+			time: 1000.0 + float64(i), acked: true, packetBytes: packetBytes,
+		}
+		*endpoint.receivedPackets.insert(uint16(i)) = receivedPacketData{
+			time: 1000.0 + float64(i), packetBytes: packetBytes,
+		}
+	}
+	endpoint.Update(1008.0)
+	sent, received, acked := endpoint.Bandwidth()
+	want := float64(int64(packetBytes)*4) / 3.0 * 8.0 / 1000.0
+	for _, stat := range []struct {
+		name string
+		got  float64
+	}{
+		{"sent", sent}, {"received", received}, {"acked", acked},
+	} {
+		t.Run(stat.name, func(t *testing.T) {
+			requireStatClose(t, stat.name, stat.got, want)
+		})
+	}
+}
+
 func TestSequenceBufferAcrossWrap(t *testing.T) {
 	for _, size := range []int{3, 255} {
 		size := size

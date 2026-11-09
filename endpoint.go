@@ -149,6 +149,15 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config.RTTHistorySize <= 0 {
 		return nil, errors.New("reliable: rtt history size must be positive")
 	}
+	if math.IsNaN(config.RTTSmoothingFactor) || config.RTTSmoothingFactor < 0.0 || config.RTTSmoothingFactor > 1.0 {
+		return nil, errors.New("reliable: rtt smoothing factor must be in [0,1]")
+	}
+	if math.IsNaN(config.PacketLossSmoothingFactor) || config.PacketLossSmoothingFactor < 0.0 || config.PacketLossSmoothingFactor > 1.0 {
+		return nil, errors.New("reliable: packet loss smoothing factor must be in [0,1]")
+	}
+	if math.IsNaN(config.BandwidthSmoothingFactor) || config.BandwidthSmoothingFactor < 0.0 || config.BandwidthSmoothingFactor > 1.0 {
+		return nil, errors.New("reliable: bandwidth smoothing factor must be in [0,1]")
+	}
 	if config.TransmitPacketFunction == nil {
 		return nil, errors.New("reliable: transmit packet function must not be nil")
 	}

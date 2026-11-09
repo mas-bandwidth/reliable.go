@@ -360,7 +360,7 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 // Fragment 0 also carries the packet header, which is re-encoded canonically
 // just before the start of the packet payload so the reassembled packet can be
 // fed back through ReceivePacket.
-func (endpoint *Endpoint) storeFragmentData(reassemblyData *fragmentReassemblyData, sequence uint16, ack uint16, ackBits uint32, fragmentID int, fragmentSize int, fragmentData []byte) {
+func (endpoint *Endpoint) storeFragmentData(reassemblyData *fragmentReassemblyData, sequence uint16, ack uint16, ackBits uint32, fragmentID int, fragmentSize int, fragmentData []byte) bool {
 	fragmentBytes := len(fragmentData)
 
 	if fragmentID == 0 {
@@ -386,10 +386,12 @@ func (endpoint *Endpoint) storeFragmentData(reassemblyData *fragmentReassemblyDa
 		if debugLogging() {
 			logPrintf(LogLevelDebug, "[reliable] invalid fragment size %d (would write past %d/%d)\n", fragmentBytes, endOffset, maxSize)
 		}
-		return
+		return false
 	}
 
 	copy(reassemblyData.packetData[offset:], fragmentData[:fragmentBytes])
+
+	return true
 }
 
 // ReceivePacket processes a packet received from your socket. Valid packets
@@ -583,10 +585,10 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 				endpoint.config.Name, fragmentID, sequence, reassemblyData.numFragmentsReceived+1, numFragments)
 		}
 
-		reassemblyData.numFragmentsReceived++
-		reassemblyData.fragmentReceived[fragmentID] = true
-
-		endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:])
+		if endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:]) {
+			reassemblyData.numFragmentsReceived++
+			reassemblyData.fragmentReceived[fragmentID] = true
+		}
 
 		if reassemblyData.numFragmentsReceived == reassemblyData.numFragmentsTotal {
 			if debugLogging() {

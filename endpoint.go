@@ -449,6 +449,10 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 
 							rtt := (endpoint.time - sentPacket.time) * 1000.0
 
+							if rtt < 0 {
+								rtt = 0
+							}
+
 							index := int(ackSequence) % endpoint.config.RTTHistorySize
 
 							endpoint.rttHistoryBuffer[index] = rtt

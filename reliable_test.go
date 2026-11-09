@@ -1319,6 +1319,29 @@ func TestRTTAndJitterStats(t *testing.T) {
 	requireStatClose(t, "JitterStddevVsAvgRTT", context.sender.JitterStddevVsAvgRTT(), math.Sqrt(500.0))
 }
 
+func TestRTTClampedNonNegative(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	newTestEndpointPair(t, context, time, nil)
+
+	context.sender.Update(time)
+	context.sender.SendPacket(make([]byte, 8))
+
+	// step the sender's clock backwards before the ack is processed, as
+	// happens when the caller's clock is adjusted.
+
+	context.sender.Update(time - 1.0)
+
+	context.receiver.Update(time)
+	context.receiver.SendPacket(make([]byte, 8))
+
+	if context.sender.RTT() < 0.0 {
+		t.Fatalf("expected RTT to be non-negative after a backwards clock step, got %.6f", context.sender.RTT())
+	}
+}
+
 func TestPacketLossStats(t *testing.T) {
 	time := 100.0
 

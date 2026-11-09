@@ -1142,6 +1142,34 @@ func TestFragmentCleanup(t *testing.T) {
 	}
 }
 
+func TestStoreFragmentDataBounds(t *testing.T) {
+	context := newTestContext()
+	newTestEndpointPair(t, context, 100.0, nil)
+
+	endpoint := context.receiver
+	fragmentSize := endpoint.config.FragmentSize
+	numFragments := 2
+
+	reassemblyData := &fragmentReassemblyData{
+		numFragmentsTotal: numFragments,
+		packetData:        make([]byte, MaxPacketHeaderBytes+numFragments*fragmentSize),
+	}
+
+	fragmentID := numFragments
+	fragmentData := make([]byte, fragmentSize)
+
+	if endpoint.storeFragmentData(reassemblyData, 0, 0, 0, fragmentID, fragmentSize, fragmentData) {
+		t.Fatal("expected out-of-bounds fragment store to fail")
+	}
+
+	if reassemblyData.numFragmentsReceived != 0 {
+		t.Fatalf("expected no fragments marked received, got %d", reassemblyData.numFragmentsReceived)
+	}
+	if reassemblyData.fragmentReceived[fragmentID] {
+		t.Fatalf("expected fragment %d not to be marked received", fragmentID)
+	}
+}
+
 func TestEndpointReset(t *testing.T) {
 	time := 100.0
 

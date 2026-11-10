@@ -15,14 +15,18 @@ result to `testdata/c_transcript.txt.gz`.
 
 - Pinning means an upstream C commit CANNOT redden this repo spuriously. That is the
   opposite of netcode.go, which reads C main unpinned and can go red with no change here.
+  The `spec-sync` CI job fetches `STANDARD.md` at the same pinned commit, so it is pinned
+  too and cannot go red on an unpinned upstream change.
 - But a pin has no staleness signal. On 2026-07-26 it sat at 1.3.4 while C main was 21
   commits and one minor release ahead — and in that window the wire format was formally
   specified in STANDARD.md (+165 lines) and the header size bounds were corrected. The
   check was green throughout and would have stayed green even if the wire HAD moved.
   Verified by regenerating against C main: byte-identical, so the port was fine. That was
   luck confirmed, not a guarantee earned.
-- **So: when C cuts a release, bump the pin and regenerate.** A green wire check only
-  means "compatible with whatever this pin points at."
+- **So: when C cuts a release, bump the pin and regenerate.** The pin lives in both
+  `interop/regenerate.sh` (`RELIABLE_C_COMMIT`) and the `spec-sync` job in
+  `.github/workflows/ci.yml`; bump both together. A green wire check only means
+  "compatible with whatever this pin points at."
 
 DECISIONS
 - The golden transcript is committed (`testdata/c_transcript.txt.gz`) so the test runs

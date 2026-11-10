@@ -17,6 +17,9 @@ func newSequenceBuffer[T any](numEntries int) *sequenceBuffer[T] {
 	if numEntries <= 0 {
 		panic("reliable: sequence buffer must have at least one entry")
 	}
+	// Slots are sequence % numEntries and sequence is 16 bits, so the count is
+	// rounded up to a power of two when it is not already one.
+	numEntries = roundSequenceBufferEntries(numEntries)
 	buffer := &sequenceBuffer[T]{
 		numEntries:    numEntries,
 		entrySequence: make([]uint32, numEntries),
@@ -26,6 +29,21 @@ func newSequenceBuffer[T any](numEntries int) *sequenceBuffer[T] {
 		buffer.entrySequence[i] = entryEmpty
 	}
 	return buffer
+}
+
+func roundSequenceBufferEntries(n int) int {
+	if n <= 1 || n&(n-1) == 0 {
+		return n
+	}
+	p := 1
+	for p < n {
+		next := p << 1
+		if next <= p {
+			return n
+		}
+		p = next
+	}
+	return p
 }
 
 func (b *sequenceBuffer[T]) reset() {

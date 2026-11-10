@@ -211,7 +211,7 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config.PacketHeaderSize < 0 {
 		return nil, errors.New("reliable: packet header size must not be negative")
 	}
-	if config.PacketHeaderSize > maxInt-config.MaxPacketSize {
+	if config.PacketHeaderSize > maxInt-config.MaxPacketSize-MaxPacketHeaderBytes-FragmentHeaderBytes {
 		return nil, errors.New("reliable: packet header size plus max packet size does not fit a packet length")
 	}
 

@@ -340,6 +340,14 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 			},
 		},
 		{
+			name:    "packet header size leaves no room for received headers",
+			wantErr: "packet header size plus max packet size does not fit a packet length",
+			modify: func(config *Config) {
+				maxInt := int(^uint(0) >> 1)
+				config.PacketHeaderSize = maxInt - config.MaxPacketSize - MaxPacketHeaderBytes - FragmentHeaderBytes + 1
+			},
+		},
+		{
 			name:    "negative packet header size",
 			wantErr: "packet header size must not be negative",
 			modify: func(config *Config) {
@@ -377,6 +385,19 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 		}
 		if endpoint == nil {
 			t.Fatal("expected endpoint for exactly covering config")
+		}
+	})
+
+	t.Run("largest packet header size is valid", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		maxInt := int(^uint(0) >> 1)
+		config.PacketHeaderSize = maxInt - config.MaxPacketSize - MaxPacketHeaderBytes - FragmentHeaderBytes
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("largest packet header size was refused: %v", err)
+		}
+		if endpoint == nil {
+			t.Fatal("expected endpoint for largest packet header size")
 		}
 	})
 

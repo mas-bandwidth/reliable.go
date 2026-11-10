@@ -90,12 +90,12 @@ jobs:
       # it implies, then copy the new file across in the same commit.
       #
       # Fetch from the same pinned C release commit as interop/regenerate.sh's
-      # RELIABLE_C_COMMIT (reliable 1.4.4), so an unpinned upstream change
+      # RELIABLE_C_COMMIT (the reliable v1.4.5 tag), so an unpinned upstream change
       # cannot redden this job on its own.
       - name: Compare against mas-bandwidth/reliable
         run: |
           curl -fsSL -o /tmp/upstream-STANDARD.md \
-            https://raw.githubusercontent.com/mas-bandwidth/reliable/d4b6fe0882d2d752d57984f70e7a29037982984f/STANDARD.md
+            https://raw.githubusercontent.com/mas-bandwidth/reliable/e4e70927d1656ffcd822309fc2aa7af004c58f6a/STANDARD.md
           if ! diff -u /tmp/upstream-STANDARD.md STANDARD.md; then
             echo "::error::STANDARD.md has diverged from mas-bandwidth/reliable"
             exit 1

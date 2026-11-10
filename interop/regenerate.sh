@@ -13,7 +13,7 @@ set -euo pipefail
 # a green TestWireCompatibility MEANS, not what it checks: the check now proves
 # compatibility with the current C release rather than with one release behind.
 # A pin has no staleness signal of its own.
-RELIABLE_C_COMMIT=3d06ae1ead42ec1532ee93be43d80f1e31cfba95 # reliable 1.4.5
+RELIABLE_C_COMMIT=e4e70927d1656ffcd822309fc2aa7af004c58f6a # reliable v1.4.5 tag
 
 here="$(cd "$(dirname "$0")" && pwd)"
 out="${1:-$here/../testdata/c_transcript.txt.gz}"

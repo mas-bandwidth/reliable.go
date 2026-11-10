@@ -234,13 +234,13 @@ func TestWireCompatibility(t *testing.T) {
 }
 
 type wireHeaderCoverage struct {
-	regularPackets         int
-	fragmentDatagrams      int
-	multiFragmentPackets   int
-	prefixes               map[byte]int
-	headersWithElidedBytes int
-	eightBitAcks           int
-	sixteenBitAcks         int
+	regularPackets        int
+	fragmentDatagrams     int
+	multiFragmentPackets  int
+	prefixes              map[byte]int
+	headersWithElidedBits int
+	eightBitAcks          int
+	sixteenBitAcks        int
 }
 
 func wireRecordHeader(coverage *wireHeaderCoverage, header []byte) {
@@ -257,14 +257,16 @@ func wireRecordHeader(coverage *wireHeaderCoverage, header []byte) {
 		coverage.sixteenBitAcks++
 	}
 
+	// Bits 2, 3 and 4 mark the three optional ack-bits bytes. A header with
+	// any of them clear carries at least one elided ack-bits byte.
 	elided := false
-	for i := 1; i <= 4; i++ {
+	for i := 2; i <= 4; i++ {
 		if prefix&(1<<i) == 0 {
 			elided = true
 		}
 	}
 	if elided {
-		coverage.headersWithElidedBytes++
+		coverage.headersWithElidedBits++
 	}
 }
 
@@ -348,7 +350,7 @@ func TestWireTranscriptScenarioCoverage(t *testing.T) {
 	if len(coverage.prefixes) < 4 {
 		t.Errorf("expected at least 4 distinct packet header prefixes, got %d: %v", len(coverage.prefixes), coverage.prefixes)
 	}
-	if coverage.headersWithElidedBytes == 0 {
+	if coverage.headersWithElidedBits == 0 {
 		t.Error("expected at least one header with an elided ack-bits byte")
 	}
 	if coverage.eightBitAcks == 0 {

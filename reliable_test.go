@@ -1741,6 +1741,48 @@ func TestEndpointReset(t *testing.T) {
 	}
 }
 
+func TestEndpointResetDropsRoundedReassemblySlots(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	// 5 rounds up to 8 reassembly slots
+
+	newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+		senderConfig.FragmentAbove = 500
+		receiverConfig.FragmentAbove = 500
+		receiverConfig.FragmentReassemblyBufferSize = 5
+	})
+
+	if context.receiver.fragmentReassembly.numEntries != 8 {
+		t.Fatalf("expected 8 reassembly slots, got %d", context.receiver.fragmentReassembly.numEntries)
+	}
+
+	// advance the sender to sequence 6, a slot past the configured size
+
+	for i := 0; i < 6; i++ {
+		context.sender.SendPacket(make([]byte, 8))
+	}
+
+	// leave a fragment reassembly in progress in slot 6 by delivering only the first fragment
+
+	context.allowPackets = 1
+	context.sender.SendPacket(make([]byte, 1500))
+	context.allowPackets = -1
+
+	if context.receiver.fragmentReassembly.entries[6].packetData == nil {
+		t.Fatal("expected a reassembly buffer in slot 6")
+	}
+
+	context.receiver.Reset()
+
+	for i := 0; i < context.receiver.fragmentReassembly.numEntries; i++ {
+		if context.receiver.fragmentReassembly.entries[i].packetData != nil {
+			t.Fatalf("expected reassembly buffer at index %d to be dropped after reset", i)
+		}
+	}
+}
+
 func requireStatClose(t *testing.T, name string, got, want float64) {
 	t.Helper()
 	const tolerance = 1e-6

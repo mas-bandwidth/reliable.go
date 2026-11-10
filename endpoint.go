@@ -648,7 +648,7 @@ func (endpoint *Endpoint) Reset() {
 
 	endpoint.counters = [NumCounters]uint64{}
 
-	for i := range endpoint.config.FragmentReassemblyBufferSize {
+	for i := range endpoint.fragmentReassembly.numEntries {
 		reassemblyData := endpoint.fragmentReassembly.atIndex(i)
 
 		if reassemblyData != nil && reassemblyData.packetData != nil {

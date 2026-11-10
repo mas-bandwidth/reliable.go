@@ -208,10 +208,13 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config.MaxPacketSize > maxInt-MaxPacketHeaderBytes-FragmentHeaderBytes {
 		return nil, errors.New("reliable: max packet size is too large for the receive length check")
 	}
+	if config.FragmentSize > maxInt-FragmentHeaderBytes-MaxPacketHeaderBytes {
+		return nil, errors.New("reliable: fragment size is too large for the transmit buffer")
+	}
 	if config.PacketHeaderSize < 0 {
 		return nil, errors.New("reliable: packet header size must not be negative")
 	}
-	if config.PacketHeaderSize > maxInt-config.MaxPacketSize {
+	if config.PacketHeaderSize > maxInt-config.MaxPacketSize-MaxPacketHeaderBytes-FragmentHeaderBytes {
 		return nil, errors.New("reliable: packet header size plus max packet size does not fit a packet length")
 	}
 
@@ -589,10 +592,17 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 				endpoint.config.Name, fragmentID, sequence, reassemblyData.numFragmentsReceived+1, numFragments)
 		}
 
-		if endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:]) {
-			reassemblyData.numFragmentsReceived++
-			reassemblyData.fragmentReceived[fragmentID] = true
+		if !endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:]) {
+			if errorLogging() {
+				logPrintf(LogLevelError, "[%s] ignoring fragment %d of packet %d. could not store fragment data\n",
+					endpoint.config.Name, fragmentID, sequence)
+			}
+			endpoint.counters[CounterNumFragmentsInvalid]++
+			return
 		}
+
+		reassemblyData.numFragmentsReceived++
+		reassemblyData.fragmentReceived[fragmentID] = true
 
 		if reassemblyData.numFragmentsReceived == reassemblyData.numFragmentsTotal {
 			if debugLogging() {
@@ -648,7 +658,7 @@ func (endpoint *Endpoint) Reset() {
 
 	endpoint.counters = [NumCounters]uint64{}
 
-	for i := range endpoint.config.FragmentReassemblyBufferSize {
+	for i := range endpoint.fragmentReassembly.numEntries {
 		reassemblyData := endpoint.fragmentReassembly.atIndex(i)
 
 		if reassemblyData != nil && reassemblyData.packetData != nil {

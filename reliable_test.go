@@ -329,6 +329,17 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 			},
 		},
 		{
+			name:    "fragment transmit buffer overflow",
+			wantErr: "fragment size is too large for the transmit buffer",
+			modify: func(config *Config) {
+				maxInt := int(^uint(0) >> 1)
+				config.MaxFragments = 1
+				config.FragmentSize = maxInt - FragmentHeaderBytes - MaxPacketHeaderBytes + 1
+				config.MaxPacketSize = 1
+				config.FragmentAbove = 1
+			},
+		},
+		{
 			name:    "packet header length overflow",
 			wantErr: "packet header size plus max packet size does not fit a packet length",
 			modify: func(config *Config) {
@@ -337,6 +348,14 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 				config.FragmentSize = maxInt - MaxPacketHeaderBytes - FragmentHeaderBytes
 				config.MaxPacketSize = maxInt - MaxPacketHeaderBytes - FragmentHeaderBytes
 				config.FragmentAbove = 1
+			},
+		},
+		{
+			name:    "packet header size leaves no room for received headers",
+			wantErr: "packet header size plus max packet size does not fit a packet length",
+			modify: func(config *Config) {
+				maxInt := int(^uint(0) >> 1)
+				config.PacketHeaderSize = maxInt - config.MaxPacketSize - MaxPacketHeaderBytes - FragmentHeaderBytes + 1
 			},
 		},
 		{
@@ -377,6 +396,19 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 		}
 		if endpoint == nil {
 			t.Fatal("expected endpoint for exactly covering config")
+		}
+	})
+
+	t.Run("largest packet header size is valid", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		maxInt := int(^uint(0) >> 1)
+		config.PacketHeaderSize = maxInt - config.MaxPacketSize - MaxPacketHeaderBytes - FragmentHeaderBytes
+		endpoint, err := NewEndpoint(&config, 0)
+		if err != nil {
+			t.Fatalf("largest packet header size was refused: %v", err)
+		}
+		if endpoint == nil {
+			t.Fatal("expected endpoint for largest packet header size")
 		}
 	})
 
@@ -1738,6 +1770,48 @@ func TestEndpointReset(t *testing.T) {
 	}
 	if context.receiver.Counters()[CounterNumPacketsReceived] == 0 {
 		t.Fatal("expected receiver to have received packets after reset")
+	}
+}
+
+func TestEndpointResetDropsRoundedReassemblySlots(t *testing.T) {
+	time := 100.0
+
+	context := newTestContext()
+
+	// 5 rounds up to 8 reassembly slots
+
+	newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+		senderConfig.FragmentAbove = 500
+		receiverConfig.FragmentAbove = 500
+		receiverConfig.FragmentReassemblyBufferSize = 5
+	})
+
+	if context.receiver.fragmentReassembly.numEntries != 8 {
+		t.Fatalf("expected 8 reassembly slots, got %d", context.receiver.fragmentReassembly.numEntries)
+	}
+
+	// advance the sender to sequence 6, a slot past the configured size
+
+	for i := 0; i < 6; i++ {
+		context.sender.SendPacket(make([]byte, 8))
+	}
+
+	// leave a fragment reassembly in progress in slot 6 by delivering only the first fragment
+
+	context.allowPackets = 1
+	context.sender.SendPacket(make([]byte, 1500))
+	context.allowPackets = -1
+
+	if context.receiver.fragmentReassembly.entries[6].packetData == nil {
+		t.Fatal("expected a reassembly buffer in slot 6")
+	}
+
+	context.receiver.Reset()
+
+	for i := 0; i < context.receiver.fragmentReassembly.numEntries; i++ {
+		if context.receiver.fragmentReassembly.entries[i].packetData != nil {
+			t.Fatalf("expected reassembly buffer at index %d to be dropped after reset", i)
+		}
 	}
 }
 

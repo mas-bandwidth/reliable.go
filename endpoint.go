@@ -14,23 +14,52 @@ type TransmitPacketFunction func(id uint64, sequence uint16, packetData []byte)
 // ProcessPacketFunction is called when a packet is received: (id, sequence,
 // packetData). Return true to accept and ack the packet, false to reject it
 // (rejected packets are not acked and may be processed again if they arrive
-// again). The packet data is only valid for the duration of the call, so copy
-// it if you need to keep it. To pass state to the callback, use a closure or
-// a method value.
+// again).
+//
+// packetData is the packet payload and may be zero-length, for example if a
+// peer sends a header-only packet, so do not assume it is non-empty.
+//
+// The callback runs while the endpoint is processing the packet. Calling
+// ReceivePacket re-entrantly on the same Endpoint from inside the callback is
+// forbidden and corrupts the receive state. Acks carried by a packet rejected
+// by the callback are discarded: returning false drops the packet's ack and
+// ack bits along with the packet itself. A packet sent from inside the
+// callback does not yet ack the packet being processed, because that packet is
+// only recorded as received after the callback returns.
+//
+// The packet data is only valid for the duration of the call, so copy it if
+// you need to keep it. To pass state to the callback, use a closure or a
+// method value.
 type ProcessPacketFunction func(id uint64, sequence uint16, packetData []byte) bool
 
 // Config configures an Endpoint.
+//
+// Peers must agree on FragmentSize and use compatible MaxFragments limits.
+// The sender splits a fragmented packet into len(packetData)/FragmentSize
+// fragments rounded up, at most MaxPacketSize/FragmentSize rounded up. The
+// receiver rejects counts above its own MaxFragments and checks payload sizes
+// against its own FragmentSize: non-final fragments must match it exactly,
+// and the final fragment must not exceed it.
+//
+// Update samples the oldest half of each packet buffer. SentPacketsBufferSize
+// less than 2 yields no packet loss sample. A buffer size less than 4 yields
+// no sample for the bandwidth figures it feeds: SentPacketsBufferSize feeds
+// sent and acked bandwidth; ReceivedPacketsBufferSize feeds received bandwidth.
 type Config struct {
-	Name                         string                 // name of the endpoint. used in log output
-	ID                           uint64                 // id of the endpoint. passed to callbacks so shared callbacks can tell endpoints apart
-	MaxPacketSize                int                    // maximum packet size that can be sent or received (bytes)
-	FragmentAbove                int                    // packets larger than this many bytes are sent as fragments
-	MaxFragments                 int                    // maximum number of fragments per-packet. 256 max. must cover MaxPacketSize / FragmentSize
-	FragmentSize                 int                    // size of each fragment (bytes)
-	AckBufferSize                int                    // maximum number of acks buffered between calls to Endpoint.ClearAcks
-	SentPacketsBufferSize        int                    // number of sent packets tracked for acks, packet loss and bandwidth stats
-	ReceivedPacketsBufferSize    int                    // number of received packets tracked. also the window for stale and duplicate packet rejection
-	FragmentReassemblyBufferSize int                    // number of packets that can be under reassembly from fragments at the same time
+	Name                      string // name of the endpoint. used in log output
+	ID                        uint64 // id of the endpoint. passed to callbacks so shared callbacks can tell endpoints apart
+	MaxPacketSize             int    // maximum packet size that can be sent or received (bytes)
+	FragmentAbove             int    // packets larger than this many bytes are sent as fragments
+	MaxFragments              int    // maximum number of fragments per-packet. 256 max. must cover MaxPacketSize / FragmentSize
+	FragmentSize              int    // size of each fragment (bytes)
+	AckBufferSize             int    // maximum number of acks buffered between calls to Endpoint.ClearAcks
+	SentPacketsBufferSize     int    // number of sent packets tracked for acks, packet loss and bandwidth stats
+	ReceivedPacketsBufferSize int    // number of received packets tracked. also the window for stale and duplicate packet rejection
+	// FragmentReassemblyBufferSize sets the reassembly window, rounded up to a
+	// power of two. It bounds the per-endpoint reassembly packet buffers to
+	// N * (9 + MaxFragments * FragmentSize) bytes,
+	// where N is FragmentReassemblyBufferSize rounded up to a power of two.
+	FragmentReassemblyBufferSize int
 	RTTSmoothingFactor           float64                // exponential smoothing factor for the rtt moving average
 	RTTHistorySize               int                    // number of rtt samples kept for min/max/avg rtt and jitter
 	PacketLossSmoothingFactor    float64                // exponential smoothing factor for packet loss
@@ -268,7 +297,7 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 
 		copy(transmitPacketData[packetHeaderBytes:], packetData)
 
-		endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, transmitPacketData[:packetHeaderBytes+packetBytes])
+		endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, transmitPacketData[:packetHeaderBytes+packetBytes:packetHeaderBytes+packetBytes])
 	} else {
 		// fragmented packet
 
@@ -318,7 +347,7 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 			p += bytesToCopy
 			q += bytesToCopy
 
-			endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, fragmentPacketData[:p])
+			endpoint.config.TransmitPacketFunction(endpoint.config.ID, sequence, fragmentPacketData[:p:p])
 
 			endpoint.counters[CounterNumFragmentsSent]++
 		}
@@ -331,7 +360,7 @@ func (endpoint *Endpoint) SendPacket(packetData []byte) {
 // Fragment 0 also carries the packet header, which is re-encoded canonically
 // just before the start of the packet payload so the reassembled packet can be
 // fed back through ReceivePacket.
-func (endpoint *Endpoint) storeFragmentData(reassemblyData *fragmentReassemblyData, sequence uint16, ack uint16, ackBits uint32, fragmentID int, fragmentSize int, fragmentData []byte) {
+func (endpoint *Endpoint) storeFragmentData(reassemblyData *fragmentReassemblyData, sequence uint16, ack uint16, ackBits uint32, fragmentID int, fragmentSize int, fragmentData []byte) bool {
 	fragmentBytes := len(fragmentData)
 
 	if fragmentID == 0 {
@@ -357,10 +386,12 @@ func (endpoint *Endpoint) storeFragmentData(reassemblyData *fragmentReassemblyDa
 		if debugLogging() {
 			logPrintf(LogLevelDebug, "[reliable] invalid fragment size %d (would write past %d/%d)\n", fragmentBytes, endOffset, maxSize)
 		}
-		return
+		return false
 	}
 
 	copy(reassemblyData.packetData[offset:], fragmentData[:fragmentBytes])
+
+	return true
 }
 
 // ReceivePacket processes a packet received from your socket. Valid packets
@@ -433,7 +464,7 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 			logPrintf(LogLevelDebug, "[%s] processing packet %d\n", endpoint.config.Name, sequence)
 		}
 
-		if endpoint.config.ProcessPacketFunction(endpoint.config.ID, sequence, packetData[packetHeaderBytes:]) {
+		if endpoint.config.ProcessPacketFunction(endpoint.config.ID, sequence, packetData[packetHeaderBytes:packetBytes:packetBytes]) {
 			if debugLogging() {
 				logPrintf(LogLevelDebug, "[%s] process packet %d successful\n", endpoint.config.Name, sequence)
 			}
@@ -462,6 +493,10 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 
 							rtt := (endpoint.time - sentPacket.time) * 1000.0
 
+							if rtt < 0 {
+								rtt = 0
+							}
+
 							index := int(ackSequence) % endpoint.config.RTTHistorySize
 
 							endpoint.rttHistoryBuffer[index] = rtt
@@ -489,7 +524,7 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 	} else {
 		// fragment packet
 
-		fragmentID, numFragments, _, sequence, ack, ackBits, fragmentHeaderBytes := readFragmentHeader(endpoint.config.Name, packetData, endpoint.config.MaxFragments, endpoint.config.FragmentSize)
+		fragmentID, numFragments, sequence, ack, ackBits, fragmentHeaderBytes := readFragmentHeader(endpoint.config.Name, packetData, endpoint.config.MaxFragments, endpoint.config.FragmentSize)
 
 		if fragmentHeaderBytes < 0 {
 			if debugLogging() {
@@ -554,10 +589,10 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 				endpoint.config.Name, fragmentID, sequence, reassemblyData.numFragmentsReceived+1, numFragments)
 		}
 
-		reassemblyData.numFragmentsReceived++
-		reassemblyData.fragmentReceived[fragmentID] = true
-
-		endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:])
+		if endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:]) {
+			reassemblyData.numFragmentsReceived++
+			reassemblyData.fragmentReceived[fragmentID] = true
+		}
 
 		if reassemblyData.numFragmentsReceived == reassemblyData.numFragmentsTotal {
 			if debugLogging() {
@@ -611,7 +646,10 @@ func (endpoint *Endpoint) Reset() {
 }
 
 // Update updates rtt, jitter, packet loss and bandwidth stats. Call once
-// per-frame with the current time in seconds.
+// per-frame with the current time in seconds. time must be monotonically
+// non-decreasing: passing a value earlier than a previous call (or earlier
+// than the time passed to NewEndpoint or used to process a packet since the
+// last call) yields invalid rtt and bandwidth figures.
 func (endpoint *Endpoint) Update(time float64) {
 	endpoint.time = time
 
@@ -865,6 +903,16 @@ func (endpoint *Endpoint) PacketLoss() float64 {
 
 // Bandwidth returns the sent, received and acked bandwidth in kilobits
 // per-second.
+//
+// Sent bandwidth includes every packet sent in the sample window, whether or
+// not it was acked, and counts the assumed network header overhead
+// (Config.PacketHeaderSize) in addition to the payload. Received bandwidth
+// includes every accepted packet received in the window and counts the assumed
+// network header overhead in addition to the received packet bytes, which
+// include the reliable packet header. Acked bandwidth includes only sent
+// packets in the window that have been acked, using the same byte count as
+// sent bandwidth. A figure that cannot be sampled (for example while no
+// packets fall in its window) retains its previous value.
 func (endpoint *Endpoint) Bandwidth() (sentBandwidthKbps, receivedBandwidthKbps, ackedBandwidthKbps float64) {
 	return endpoint.sentBandwidthKbps, endpoint.receivedBandwidthKbps, endpoint.ackedBandwidthKbps
 }

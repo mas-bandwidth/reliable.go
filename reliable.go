@@ -78,24 +78,31 @@ func SetLogLevel(level LogLevel) {
 	logLevel.Store(int32(level))
 }
 
-var printfFunction func(format string, args ...any) = func(format string, args ...any) {
-	fmt.Printf(format, args...)
+var printfFunction atomic.Pointer[func(format string, args ...any)]
+
+func init() {
+	defaultPrintfFunction := func(format string, args ...any) {
+		fmt.Printf(format, args...)
+	}
+	printfFunction.Store(&defaultPrintfFunction)
 }
 
 // SetPrintfFunction overrides where log output goes (process-wide). The default
-// prints to standard output. Set this before creating any endpoints.
+// prints to standard output. This may be called while endpoints are active.
 func SetPrintfFunction(function func(format string, args ...any)) {
 	if function == nil {
 		panic("reliable: printf function must not be nil")
 	}
-	printfFunction = function
+	printfFunction.Store(&function)
 }
 
 func logPrintf(level LogLevel, format string, args ...any) {
 	if int32(level) > logLevel.Load() {
 		return
 	}
-	printfFunction(format, args...)
+	if function := printfFunction.Load(); function != nil {
+		(*function)(format, args...)
+	}
 }
 
 // errorLogging reports whether error log output is enabled. Hot paths check

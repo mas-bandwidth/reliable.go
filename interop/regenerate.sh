@@ -8,15 +8,12 @@
 
 set -euo pipefail
 
-# Bumped 2026-09-13 from c5be93c (1.4.0) to the C 1.4.4 release, per the rule in
-# CLAUDE.md: when C cuts a release, bump the pin and regenerate. The regenerated
-# transcript is BYTE-IDENTICAL again -- the wire did not move across 1.4.1 through
-# 1.4.4, whose changes were strict floating point, the export surface, 64-bit
-# fragment arithmetic with refused configurations, and an allocation-failure guard.
-# So this changes what a green TestWireCompatibility MEANS, not what it checks: the
-# check now proves compatibility with the current C release rather than with one
-# four patch releases behind. A pin has no staleness signal of its own.
-RELIABLE_C_COMMIT=d4b6fe0882d2d752d57984f70e7a29037982984f # reliable 1.4.4
+# Bumped 2026-11-09 from d4b6fe0 (1.4.4) to the C 1.4.5 release, per the rule in
+# CLAUDE.md: when C cuts a release, bump the pin and regenerate. This changes what
+# a green TestWireCompatibility MEANS, not what it checks: the check now proves
+# compatibility with the current C release rather than with one release behind.
+# A pin has no staleness signal of its own.
+RELIABLE_C_COMMIT=3d06ae1ead42ec1532ee93be43d80f1e31cfba95 # reliable 1.4.5
 
 here="$(cd "$(dirname "$0")" && pwd)"
 out="${1:-$here/../testdata/c_transcript.txt.gz}"

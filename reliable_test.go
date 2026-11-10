@@ -2701,3 +2701,81 @@ func TestNewEndpointInvalidConfig(t *testing.T) {
 		})
 	}
 }
+func TestVersion(t *testing.T) {
+	if VersionMajor != 1 || VersionMinor != 4 || VersionPatch != 5 {
+		t.Fatalf("expected version 1.4.5, got %d.%d.%d", VersionMajor, VersionMinor, VersionPatch)
+	}
+
+	want := fmt.Sprintf("%d.%d.%d", VersionMajor, VersionMinor, VersionPatch)
+	if VersionFull != want {
+		t.Fatalf("expected VersionFull %q, got %q", want, VersionFull)
+	}
+}
+
+func TestEndpointResetClearsStats(t *testing.T) {
+	context := newTestContext()
+
+	newTestEndpointPair(t, context, 100.0, nil)
+
+	endpoint := context.sender
+
+	endpoint.rtt = 1.0
+	endpoint.rttMin = 2.0
+	endpoint.rttMax = 3.0
+	endpoint.rttAvg = 4.0
+	endpoint.jitterAvgVsMinRTT = 5.0
+	endpoint.jitterStddevVsAvgRTT = 6.0
+	endpoint.jitterMaxVsMinRTT = 7.0
+	endpoint.packetLoss = 8.0
+	endpoint.sentBandwidthKbps = 9.0
+	endpoint.receivedBandwidthKbps = 10.0
+	endpoint.ackedBandwidthKbps = 11.0
+
+	for i := range endpoint.rttHistoryBuffer {
+		endpoint.rttHistoryBuffer[i] = 12.0
+	}
+
+	endpoint.Reset()
+
+	if endpoint.RTT() != 0.0 {
+		t.Fatalf("expected rtt 0 after reset, got %v", endpoint.RTT())
+	}
+	if endpoint.RTTMin() != 0.0 {
+		t.Fatalf("expected rtt min 0 after reset, got %v", endpoint.RTTMin())
+	}
+	if endpoint.RTTMax() != 0.0 {
+		t.Fatalf("expected rtt max 0 after reset, got %v", endpoint.RTTMax())
+	}
+	if endpoint.RTTAvg() != 0.0 {
+		t.Fatalf("expected rtt avg 0 after reset, got %v", endpoint.RTTAvg())
+	}
+	if endpoint.JitterAvgVsMinRTT() != 0.0 {
+		t.Fatalf("expected jitter avg vs min rtt 0 after reset, got %v", endpoint.JitterAvgVsMinRTT())
+	}
+	if endpoint.JitterStddevVsAvgRTT() != 0.0 {
+		t.Fatalf("expected jitter stddev vs avg rtt 0 after reset, got %v", endpoint.JitterStddevVsAvgRTT())
+	}
+	if endpoint.JitterMaxVsMinRTT() != 0.0 {
+		t.Fatalf("expected jitter max vs min rtt 0 after reset, got %v", endpoint.JitterMaxVsMinRTT())
+	}
+	if endpoint.PacketLoss() != 0.0 {
+		t.Fatalf("expected packet loss 0 after reset, got %v", endpoint.PacketLoss())
+	}
+
+	sentBandwidthKbps, receivedBandwidthKbps, ackedBandwidthKbps := endpoint.Bandwidth()
+	if sentBandwidthKbps != 0.0 {
+		t.Fatalf("expected sent bandwidth 0 after reset, got %v", sentBandwidthKbps)
+	}
+	if receivedBandwidthKbps != 0.0 {
+		t.Fatalf("expected received bandwidth 0 after reset, got %v", receivedBandwidthKbps)
+	}
+	if ackedBandwidthKbps != 0.0 {
+		t.Fatalf("expected acked bandwidth 0 after reset, got %v", ackedBandwidthKbps)
+	}
+
+	for i, rtt := range endpoint.rttHistoryBuffer {
+		if rtt != -1.0 {
+			t.Fatalf("expected rtt history buffer entry %d to be -1 after reset, got %v", i, rtt)
+		}
+	}
+}

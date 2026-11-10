@@ -630,6 +630,22 @@ func (endpoint *Endpoint) Reset() {
 	endpoint.acks = endpoint.acks[:0]
 	endpoint.sequence = 0
 
+	endpoint.rtt = 0.0
+	endpoint.rttMin = 0.0
+	endpoint.rttMax = 0.0
+	endpoint.rttAvg = 0.0
+	endpoint.jitterAvgVsMinRTT = 0.0
+	endpoint.jitterStddevVsAvgRTT = 0.0
+	endpoint.jitterMaxVsMinRTT = 0.0
+	endpoint.packetLoss = 0.0
+	endpoint.sentBandwidthKbps = 0.0
+	endpoint.receivedBandwidthKbps = 0.0
+	endpoint.ackedBandwidthKbps = 0.0
+
+	for i := range endpoint.rttHistoryBuffer {
+		endpoint.rttHistoryBuffer[i] = -1.0
+	}
+
 	endpoint.counters = [NumCounters]uint64{}
 
 	for i := range endpoint.config.FragmentReassemblyBufferSize {

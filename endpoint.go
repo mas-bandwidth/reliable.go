@@ -208,6 +208,9 @@ func NewEndpoint(config *Config, time float64) (*Endpoint, error) {
 	if config.MaxPacketSize > maxInt-MaxPacketHeaderBytes-FragmentHeaderBytes {
 		return nil, errors.New("reliable: max packet size is too large for the receive length check")
 	}
+	if config.FragmentSize > maxInt-FragmentHeaderBytes-MaxPacketHeaderBytes {
+		return nil, errors.New("reliable: fragment size is too large for the transmit buffer")
+	}
 	if config.PacketHeaderSize < 0 {
 		return nil, errors.New("reliable: packet header size must not be negative")
 	}

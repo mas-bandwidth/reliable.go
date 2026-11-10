@@ -329,6 +329,17 @@ func TestNewEndpointFragmentConfigValidation(t *testing.T) {
 			},
 		},
 		{
+			name:    "fragment transmit buffer overflow",
+			wantErr: "fragment size is too large for the transmit buffer",
+			modify: func(config *Config) {
+				maxInt := int(^uint(0) >> 1)
+				config.MaxFragments = 1
+				config.FragmentSize = maxInt - FragmentHeaderBytes - MaxPacketHeaderBytes + 1
+				config.MaxPacketSize = 1
+				config.FragmentAbove = 1
+			},
+		},
+		{
 			name:    "packet header length overflow",
 			wantErr: "packet header size plus max packet size does not fit a packet length",
 			modify: func(config *Config) {

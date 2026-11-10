@@ -378,6 +378,71 @@ func TestNewEndpointBufferSizeValidation(t *testing.T) {
 	}
 }
 
+func TestNewEndpointSmoothingFactorRangeValidation(t *testing.T) {
+	factors := []struct {
+		name   string
+		modify func(*Config, float64)
+	}{
+		{
+			name: "rtt smoothing factor",
+			modify: func(config *Config, value float64) {
+				config.RTTSmoothingFactor = value
+			},
+		},
+		{
+			name: "packet loss smoothing factor",
+			modify: func(config *Config, value float64) {
+				config.PacketLossSmoothingFactor = value
+			},
+		},
+		{
+			name: "bandwidth smoothing factor",
+			modify: func(config *Config, value float64) {
+				config.BandwidthSmoothingFactor = value
+			},
+		},
+	}
+
+	invalidValues := []struct {
+		name  string
+		value float64
+	}{
+		{name: "negative", value: -0.1},
+		{name: "above one", value: 1.1},
+		{name: "not a number", value: math.NaN()},
+	}
+
+	for _, factor := range factors {
+		for _, invalid := range invalidValues {
+			t.Run(factor.name+" rejects "+invalid.name, func(t *testing.T) {
+				config := endpointConfigForValidation()
+				factor.modify(&config, invalid.value)
+				endpoint, err := NewEndpoint(&config, 0)
+				if err == nil {
+					if endpoint != nil {
+						t.Fatal("expected out of range smoothing factor to be refused")
+					}
+					t.Fatal("expected smoothing factor range error")
+				}
+			})
+		}
+
+		for _, validValue := range []float64{0.0, 1.0} {
+			t.Run(factor.name+" accepts "+strconv.FormatFloat(validValue, 'g', -1, 64), func(t *testing.T) {
+				config := endpointConfigForValidation()
+				factor.modify(&config, validValue)
+				endpoint, err := NewEndpoint(&config, 0)
+				if err != nil {
+					t.Fatalf("valid smoothing factor %v was refused: %v", validValue, err)
+				}
+				if endpoint == nil {
+					t.Fatalf("expected endpoint for valid smoothing factor %v", validValue)
+				}
+			})
+		}
+	}
+}
+
 // newTestEndpointPair creates a connected sender/receiver pair with the given
 // config modifications applied to both endpoints.
 func newTestEndpointPair(t *testing.T, context *testContext, time float64, modifyConfig func(senderConfig, receiverConfig *Config)) {
@@ -693,6 +758,217 @@ func TestLoggingPacketExchange(t *testing.T) {
 			}
 		})
 	}
+}
+
+func makeTestRegularPacket(config *Config, sequence uint16, payload []byte) []byte {
+	packetData := make([]byte, MaxPacketHeaderBytes+len(payload))
+	headerBytes := writePacketHeader(packetData, sequence, 0xFFFF, 0)
+	copy(packetData[headerBytes:], payload)
+	return packetData[:headerBytes+len(payload)]
+}
+
+func makeTestFragmentPacket(config *Config, sequence uint16, fragmentID, numFragments int) []byte {
+	packetData := make([]byte, FragmentHeaderBytes+MaxPacketHeaderBytes+config.FragmentSize)
+
+	packetData[0] = 1
+	packetData[1] = byte(sequence)
+	packetData[2] = byte(sequence >> 8)
+	packetData[3] = byte(fragmentID)
+	packetData[4] = byte(numFragments - 1)
+
+	p := FragmentHeaderBytes
+	if fragmentID == 0 {
+		p += writePacketHeader(packetData[p:], sequence, 0xFFFF, 0)
+	}
+
+	p += config.FragmentSize
+
+	return packetData[:p]
+}
+
+func TestNetworkEventLogLevels(t *testing.T) {
+	scenarios := []struct {
+		name  string
+		setup func(t *testing.T) func()
+		want  string
+	}{
+		{
+			name: "oversized payload",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				config.MaxPacketSize = 64
+				config.FragmentAbove = config.MaxPacketSize
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				packet := makeTestRegularPacket(&config, 0, make([]byte, config.MaxPacketSize+1))
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "packet too large to receive. packet is at",
+		},
+		{
+			name: "callback rejection",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+					return false
+				}
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				packet := makeTestRegularPacket(&config, 0, make([]byte, 8))
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "process packet failed",
+		},
+		{
+			name: "stale fragment",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				config.FragmentReassemblyBufferSize = 2
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				for sequence := uint16(0); sequence < 3; sequence++ {
+					endpoint.ReceivePacket(makeTestFragmentPacket(&config, sequence, 0, 2))
+				}
+				packet := makeTestFragmentPacket(&config, 0, 0, 2)
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "could not insert in reassembly buffer (stale)",
+		},
+		{
+			name: "fragment count mismatch",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				endpoint.ReceivePacket(makeTestFragmentPacket(&config, 0, 0, 2))
+				packet := makeTestFragmentPacket(&config, 0, 0, 3)
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "fragment count mismatch",
+		},
+		{
+			name: "duplicate fragment",
+			setup: func(t *testing.T) func() {
+				config := endpointConfigForValidation()
+				config.Name = "receiver"
+				endpoint, err := NewEndpoint(&config, 100)
+				if err != nil {
+					t.Fatalf("could not create endpoint: %v", err)
+				}
+				packet := makeTestFragmentPacket(&config, 0, 0, 2)
+				endpoint.ReceivePacket(packet)
+				return func() { endpoint.ReceivePacket(packet) }
+			},
+			want: "fragment already received",
+		},
+	}
+
+	var logs []string
+
+	SetPrintfFunction(func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	t.Cleanup(func() {
+		SetLogLevel(LogLevelNone)
+		SetPrintfFunction(func(format string, args ...any) {
+			fmt.Printf(format, args...)
+		})
+	})
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			SetLogLevel(LogLevelNone)
+			trigger := scenario.setup(t)
+			logs = logs[:0]
+
+			SetLogLevel(LogLevelError)
+			trigger()
+			for _, line := range logs {
+				if strings.Contains(line, scenario.want) {
+					t.Fatalf("expected %q at debug level only, got error log: %q", scenario.want, line)
+				}
+			}
+
+			SetLogLevel(LogLevelNone)
+			trigger = scenario.setup(t)
+			logs = logs[:0]
+
+			SetLogLevel(LogLevelDebug)
+			trigger()
+			found := false
+			for _, line := range logs {
+				if strings.Contains(line, scenario.want) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected %q with debug logging enabled, got %v", scenario.want, logs)
+			}
+		})
+	}
+}
+
+func TestReceivePacketDoesNotAllocateWhenLoggingDisabled(t *testing.T) {
+	SetLogLevel(LogLevelNone)
+	t.Cleanup(func() {
+		SetLogLevel(LogLevelNone)
+	})
+
+	t.Run("duplicate fragment", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		config.Name = "receiver"
+		endpoint, err := NewEndpoint(&config, 100)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		packet := makeTestFragmentPacket(&config, 0, 0, 2)
+		endpoint.ReceivePacket(packet)
+		if endpoint.Counters()[CounterNumFragmentsReceived] != 1 {
+			t.Fatal("expected fragment to be stored before measuring")
+		}
+
+		allocs := testing.AllocsPerRun(100, func() {
+			endpoint.ReceivePacket(packet)
+		})
+		if allocs != 0 {
+			t.Fatalf("expected 0 allocations without logging, got %v", allocs)
+		}
+	})
+
+	t.Run("rejected packet", func(t *testing.T) {
+		config := endpointConfigForValidation()
+		config.Name = "receiver"
+		config.ProcessPacketFunction = func(id uint64, sequence uint16, packetData []byte) bool {
+			return false
+		}
+		endpoint, err := NewEndpoint(&config, 100)
+		if err != nil {
+			t.Fatalf("could not create endpoint: %v", err)
+		}
+
+		packet := makeTestRegularPacket(&config, 0, make([]byte, 8))
+
+		allocs := testing.AllocsPerRun(100, func() {
+			endpoint.ReceivePacket(packet)
+		})
+		if allocs != 0 {
+			t.Fatalf("expected 0 allocations without logging, got %v", allocs)
+		}
+	})
 }
 
 const testDuplicatePacketsNumIterations = 16
@@ -1142,6 +1418,34 @@ func TestFragmentCleanup(t *testing.T) {
 	}
 }
 
+func TestStoreFragmentDataBounds(t *testing.T) {
+	context := newTestContext()
+	newTestEndpointPair(t, context, 100.0, nil)
+
+	endpoint := context.receiver
+	fragmentSize := endpoint.config.FragmentSize
+	numFragments := 2
+
+	reassemblyData := &fragmentReassemblyData{
+		numFragmentsTotal: numFragments,
+		packetData:        make([]byte, MaxPacketHeaderBytes+numFragments*fragmentSize),
+	}
+
+	fragmentID := numFragments
+	fragmentData := make([]byte, fragmentSize)
+
+	if endpoint.storeFragmentData(reassemblyData, 0, 0, 0, fragmentID, fragmentSize, fragmentData) {
+		t.Fatal("expected out-of-bounds fragment store to fail")
+	}
+
+	if reassemblyData.numFragmentsReceived != 0 {
+		t.Fatalf("expected no fragments marked received, got %d", reassemblyData.numFragmentsReceived)
+	}
+	if reassemblyData.fragmentReceived[fragmentID] {
+		t.Fatalf("expected fragment %d not to be marked received", fragmentID)
+	}
+}
+
 func TestEndpointReset(t *testing.T) {
 	time := 100.0
 
@@ -1320,7 +1624,7 @@ func TestRTTAndJitterStats(t *testing.T) {
 }
 
 func TestRTTClampedNonNegative(t *testing.T) {
-	time := 100.0
+	time := 1000.0
 
 	context := newTestContext()
 
@@ -1339,6 +1643,39 @@ func TestRTTClampedNonNegative(t *testing.T) {
 
 	if context.sender.RTT() < 0.0 {
 		t.Fatalf("expected RTT to be non-negative after a backwards clock step, got %.6f", context.sender.RTT())
+	}
+}
+
+func TestRTTMinLarge(t *testing.T) {
+	for _, sample := range []float64{9000.0, 10000.0, 12000.0} {
+		t.Run(fmt.Sprintf("%.0fms", sample), func(t *testing.T) {
+			time := 100.0
+
+			context := newTestContext()
+
+			newTestEndpointPair(t, context, time, func(senderConfig, receiverConfig *Config) {
+				senderConfig.RTTHistorySize = 8
+			})
+
+			context.sender.Update(time)
+			context.sender.SendPacket(make([]byte, 8))
+
+			ackTime := time + sample/1000.0
+
+			context.sender.Update(ackTime)
+			context.receiver.Update(ackTime)
+			context.receiver.SendPacket(make([]byte, 8))
+
+			context.sender.ClearAcks()
+			context.receiver.ClearAcks()
+
+			context.sender.Update(ackTime)
+
+			requireStatClose(t, "RTTMin", context.sender.RTTMin(), sample)
+			requireStatClose(t, "RTTMax", context.sender.RTTMax(), sample)
+			requireStatClose(t, "RTTAvg", context.sender.RTTAvg(), sample)
+			requireStatClose(t, "JitterAvgVsMinRTT", context.sender.JitterAvgVsMinRTT(), 0.0)
+		})
 	}
 }
 
@@ -1430,6 +1767,40 @@ func TestBandwidthStats(t *testing.T) {
 	requireStatClose(t, "SentBandwidthKBPS", sentBandwidthKbps, expectedSentBandwidthKbps)
 	requireStatClose(t, "ReceivedBandwidthKBPS", receivedBandwidthKbps, expectedReceivedBandwidthKbps)
 	requireStatClose(t, "AckedBandwidthKBPS", ackedBandwidthKbps, expectedAckedBandwidthKbps)
+}
+
+func TestBandwidthLargeSampleTotals(t *testing.T) {
+	const packetBytes uint32 = 1<<30 - 1
+	context := newTestContext()
+	newTestEndpointPair(t, context, 1000.0, func(senderConfig, receiverConfig *Config) {
+		senderConfig.SentPacketsBufferSize = 8
+		senderConfig.ReceivedPacketsBufferSize = 8
+		senderConfig.BandwidthSmoothingFactor = 1.0
+	})
+	endpoint := context.sender
+	// Populate only packet metadata: each length fits a signed 32-bit value,
+	// while the four sampled lengths together require a wider accumulator.
+	for i := 0; i < 8; i++ {
+		*endpoint.sentPackets.insert(uint16(i)) = sentPacketData{
+			time: 1000.0 + float64(i), acked: true, packetBytes: packetBytes,
+		}
+		*endpoint.receivedPackets.insert(uint16(i)) = receivedPacketData{
+			time: 1000.0 + float64(i), packetBytes: packetBytes,
+		}
+	}
+	endpoint.Update(1008.0)
+	sent, received, acked := endpoint.Bandwidth()
+	want := float64(int64(packetBytes)*4) / 3.0 * 8.0 / 1000.0
+	for _, stat := range []struct {
+		name string
+		got  float64
+	}{
+		{"sent", sent}, {"received", received}, {"acked", acked},
+	} {
+		t.Run(stat.name, func(t *testing.T) {
+			requireStatClose(t, stat.name, stat.got, want)
+		})
+	}
 }
 
 func TestSequenceBufferAcrossWrap(t *testing.T) {

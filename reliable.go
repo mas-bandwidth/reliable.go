@@ -31,10 +31,10 @@ import (
 
 // Version of the C reliable library this package is ported from.
 const (
-	VersionFull  = "1.4.4"
+	VersionFull  = "1.4.5"
 	VersionMajor = 1
 	VersionMinor = 4
-	VersionPatch = 4
+	VersionPatch = 5
 )
 
 // Endpoint counters. Index the array returned by Endpoint.Counters with these.

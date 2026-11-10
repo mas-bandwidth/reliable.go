@@ -2156,3 +2156,14 @@ func TestPacketsAcrossSequenceWrap(t *testing.T) {
 		testPacketsAcrossSequenceWrap(t, 255)
 	})
 }
+
+func TestVersion(t *testing.T) {
+	if VersionMajor != 1 || VersionMinor != 4 || VersionPatch != 5 {
+		t.Fatalf("expected version 1.4.5, got %d.%d.%d", VersionMajor, VersionMinor, VersionPatch)
+	}
+
+	want := fmt.Sprintf("%d.%d.%d", VersionMajor, VersionMinor, VersionPatch)
+	if VersionFull != want {
+		t.Fatalf("expected VersionFull %q, got %q", want, VersionFull)
+	}
+}

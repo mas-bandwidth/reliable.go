@@ -9,6 +9,13 @@
     generateTranscript (wire_compat_test.go) and must reproduce this output
     byte for byte.
 
+    Both endpoints are primed so their sequence numbers are close to the
+    65535 -> 0 wrap before the recorded frames begin. The sender transmits every
+    frame and the receiver every third frame, so ack deltas cross the 8 bit /
+    16 bit encoding boundary. Most packets are regular (below fragment_above)
+    with multi-fragment packets interspersed, and the loss pattern leaves runs
+    of received packets long enough for ack-bits bytes to be elided.
+
     Keep the two implementations of the scenario in sync. Regenerate the golden
     transcript with interop/regenerate.sh whenever the scenario changes.
 */
@@ -18,16 +25,30 @@
 #include <inttypes.h>
 
 #define MAX_PACKET_BYTES 4096
-#define NUM_ITERATIONS 300
+
+#define PRIME_SENDS 65520
+#define NUM_ITERATIONS 600
+
+#define SENDER_SEND_INTERVAL 1
+#define RECEIVER_SEND_INTERVAL 3
+
+#define LOSS_INTERVAL 17
+#define DUPLICATE_INTERVAL 11
 
 static struct reliable_endpoint_t * sender;
 static struct reliable_endpoint_t * receiver;
 
+static int recording = 0;
 static int transmit_count = 0;
 
 static void transmit_packet( void * context, uint64_t id, uint16_t sequence, uint8_t * packet_data, int packet_bytes )
 {
     (void) context;
+
+    if ( !recording )
+    {
+        return;
+    }
 
     transmit_count++;
 
@@ -40,7 +61,7 @@ static void transmit_packet( void * context, uint64_t id, uint16_t sequence, uin
 
     // deterministic packet loss
 
-    if ( ( transmit_count % 5 ) == 0 )
+    if ( ( transmit_count % LOSS_INTERVAL ) == 0 )
     {
         return;
     }
@@ -51,7 +72,7 @@ static void transmit_packet( void * context, uint64_t id, uint16_t sequence, uin
 
     // deterministic duplication
 
-    if ( ( transmit_count % 11 ) == 0 )
+    if ( ( transmit_count % DUPLICATE_INTERVAL ) == 0 )
     {
         reliable_endpoint_receive_packet( destination, packet_data, packet_bytes );
     }
@@ -67,9 +88,26 @@ static int process_packet( void * context, uint64_t id, uint16_t sequence, uint8
     return 1;
 }
 
-static int generate_packet_data( uint16_t sequence, uint8_t * packet_data )
+static int sender_packet_bytes( int frame )
 {
-    int packet_bytes = ( ( (int)sequence * 1023 ) % ( MAX_PACKET_BYTES - 2 ) ) + 2;
+    if ( ( frame % 13 ) == 0 )
+    {
+        return 1025 + ( frame * 197 ) % 3000;
+    }
+    return 2 + ( frame * 37 ) % 499;
+}
+
+static int receiver_packet_bytes( int send_index )
+{
+    if ( ( send_index % 7 ) == 0 )
+    {
+        return 1025 + ( send_index * 331 ) % 3000;
+    }
+    return 2 + ( send_index * 53 ) % 499;
+}
+
+static int generate_packet_data( uint16_t sequence, int packet_bytes, uint8_t * packet_data )
+{
     packet_data[0] = (uint8_t) ( sequence & 0xFF );
     packet_data[1] = (uint8_t) ( (sequence>>8) & 0xFF );
     for ( int i = 2; i < packet_bytes; i++ )
@@ -119,15 +157,37 @@ int main()
 
     uint8_t packet_data[MAX_PACKET_BYTES];
 
-    for ( int i = 0; i < NUM_ITERATIONS; i++ )
+    // prime both sequence numbers close to the wrap
+
+    for ( int i = 0; i < PRIME_SENDS; i++ )
     {
-        int packet_bytes;
-
-        packet_bytes = generate_packet_data( reliable_endpoint_next_packet_sequence( sender ), packet_data );
+        int packet_bytes = generate_packet_data( reliable_endpoint_next_packet_sequence( sender ), 4, packet_data );
         reliable_endpoint_send_packet( sender, packet_data, packet_bytes );
-
-        packet_bytes = generate_packet_data( reliable_endpoint_next_packet_sequence( receiver ), packet_data );
+    }
+    for ( int i = 0; i < PRIME_SENDS; i++ )
+    {
+        int packet_bytes = generate_packet_data( reliable_endpoint_next_packet_sequence( receiver ), 4, packet_data );
         reliable_endpoint_send_packet( receiver, packet_data, packet_bytes );
+    }
+
+    recording = 1;
+
+    int receiver_send_index = 0;
+
+    for ( int frame = 0; frame < NUM_ITERATIONS; frame++ )
+    {
+        if ( ( frame % SENDER_SEND_INTERVAL ) == 0 )
+        {
+            int packet_bytes = generate_packet_data( reliable_endpoint_next_packet_sequence( sender ), sender_packet_bytes( frame ), packet_data );
+            reliable_endpoint_send_packet( sender, packet_data, packet_bytes );
+        }
+
+        if ( ( frame % RECEIVER_SEND_INTERVAL ) == 0 )
+        {
+            int packet_bytes = generate_packet_data( reliable_endpoint_next_packet_sequence( receiver ), receiver_packet_bytes( receiver_send_index ), packet_data );
+            reliable_endpoint_send_packet( receiver, packet_data, packet_bytes );
+            receiver_send_index++;
+        }
 
         reliable_endpoint_update( sender, time );
         reliable_endpoint_update( receiver, time );

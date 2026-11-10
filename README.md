@@ -146,7 +146,7 @@ Sending and receiving packets does not allocate (fragment reassembly allocates o
 
 Binary compatibility with the C library is locked in by a golden transcript test that runs as part of `go test`, on every platform and every pull request:
 
-1. [interop/transcript.c](interop/transcript.c) runs a deterministic scenario through the C library — 300 frames of bidirectional traffic with regular and fragmented packets, deterministic packet loss and duplication — and prints every transmitted packet as hex, every ack, and the endpoint counters.
+1. [interop/transcript.c](interop/transcript.c) runs a deterministic scenario through the C library — 600 frames of bidirectional traffic at unequal send rates, mostly regular packets with multi-fragment packets interspersed, deterministic packet loss and duplication, and sequence numbers primed to cross the 65535 → 0 wrap — and prints every transmitted packet as hex, every ack, and the endpoint counters.
 2. The output, generated from the C library pinned at the commit in [interop/regenerate.sh](interop/regenerate.sh), is committed as `testdata/c_transcript.txt.gz`.
 3. `TestWireCompatibility` ([wire_compat_test.go](wire_compat_test.go)) runs the identical scenario through the Go port and requires byte-for-byte identical output.
 4. A CI job rebuilds the golden from the pinned C sources on every run, so the golden itself cannot drift from the C library.

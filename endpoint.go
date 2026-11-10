@@ -589,10 +589,17 @@ func (endpoint *Endpoint) ReceivePacket(packetData []byte) {
 				endpoint.config.Name, fragmentID, sequence, reassemblyData.numFragmentsReceived+1, numFragments)
 		}
 
-		if endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:]) {
-			reassemblyData.numFragmentsReceived++
-			reassemblyData.fragmentReceived[fragmentID] = true
+		if !endpoint.storeFragmentData(reassemblyData, sequence, ack, ackBits, fragmentID, endpoint.config.FragmentSize, packetData[fragmentHeaderBytes:]) {
+			if errorLogging() {
+				logPrintf(LogLevelError, "[%s] ignoring fragment %d of packet %d. could not store fragment data\n",
+					endpoint.config.Name, fragmentID, sequence)
+			}
+			endpoint.counters[CounterNumFragmentsInvalid]++
+			return
 		}
+
+		reassemblyData.numFragmentsReceived++
+		reassemblyData.fragmentReceived[fragmentID] = true
 
 		if reassemblyData.numFragmentsReceived == reassemblyData.numFragmentsTotal {
 			if debugLogging() {

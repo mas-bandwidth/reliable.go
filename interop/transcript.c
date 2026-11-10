@@ -120,7 +120,7 @@ static int generate_packet_data( uint16_t sequence, int packet_bytes, uint8_t * 
 static void print_acks( struct reliable_endpoint_t * endpoint, int id )
 {
     int num_acks;
-    uint16_t * acks = reliable_endpoint_get_acks( endpoint, &num_acks );
+    RELIABLE_CONST uint16_t * acks = reliable_endpoint_get_acks( endpoint, &num_acks );
     printf( "A %d", id );
     for ( int i = 0; i < num_acks; i++ )
     {

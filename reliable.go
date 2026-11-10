@@ -105,6 +105,13 @@ func logPrintf(level LogLevel, format string, args ...any) {
 	}
 }
 
+// errorLogging reports whether error log output is enabled. Hot paths check
+// this before calling logPrintf so that building the argument list costs
+// nothing when logging is off.
+func errorLogging() bool {
+	return logLevel.Load() >= int32(LogLevelError)
+}
+
 // debugLogging reports whether debug log output is enabled. Hot paths check
 // this before calling logPrintf so that building the argument list costs
 // nothing when logging is off.

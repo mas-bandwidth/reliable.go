@@ -257,16 +257,38 @@ func wireRecordHeader(coverage *wireHeaderCoverage, header []byte) {
 		coverage.sixteenBitAcks++
 	}
 
-	// Bits 2, 3 and 4 mark the three optional ack-bits bytes. A header with
+	// Bits 1, 2, 3 and 4 mark the four optional ack-bits bytes. A header with
 	// any of them clear carries at least one elided ack-bits byte.
 	elided := false
-	for i := 2; i <= 4; i++ {
+	for i := 1; i <= 4; i++ {
 		if prefix&(1<<i) == 0 {
 			elided = true
 		}
 	}
 	if elided {
 		coverage.headersWithElidedBits++
+	}
+}
+
+// TestWireHeaderCoverageCountsEachOptionalAckBitsByte checks that the header
+// coverage helper treats every one of the four optional ack-bits bytes as
+// present when its prefix bit is set and as elided when its prefix bit is
+// clear, including the low ack-bits byte selected by prefix bit 1.
+func TestWireHeaderCoverageCountsEachOptionalAckBitsByte(t *testing.T) {
+	allBitsSet := byte(1<<1 | 1<<2 | 1<<3 | 1<<4 | 1<<5)
+
+	for bit := 1; bit <= 4; bit++ {
+		coverage := wireHeaderCoverage{prefixes: make(map[byte]int)}
+		wireRecordHeader(&coverage, []byte{allBitsSet &^ byte(1<<bit), 0, 0, 0, 0})
+		if coverage.headersWithElidedBits != 1 {
+			t.Errorf("clearing prefix bit %d: expected the header to count as elided, got %d", bit, coverage.headersWithElidedBits)
+		}
+	}
+
+	coverage := wireHeaderCoverage{prefixes: make(map[byte]int)}
+	wireRecordHeader(&coverage, []byte{allBitsSet, 0, 0, 0, 0})
+	if coverage.headersWithElidedBits != 0 {
+		t.Errorf("all ack-bits bytes present: expected no elided headers, got %d", coverage.headersWithElidedBits)
 	}
 }
 

@@ -2443,8 +2443,10 @@ func TestFragmentCounts(t *testing.T) {
 	testFragmentCase(t, 64, 256, 65, 2)
 
 	// 256 fragments, the maximum the wire format can express
-	testFragmentCase(t, 64, 256, 64*256, 256)
-	testFragmentCase(t, 64, 256, 64*255+1, 256)
+	testFragmentCase(t, testFragmentCountsFragmentSize, testFragmentCountsMaxFragments,
+		testFragmentCountsFragmentSize*testFragmentCountsMaxFragments, testFragmentCountsMaxFragments)
+	testFragmentCase(t, testFragmentCountsFragmentSize, testFragmentCountsMaxFragments,
+		testFragmentCountsFragmentSize*(testFragmentCountsMaxFragments-1)+1, testFragmentCountsMaxFragments)
 
 	// at or below the threshold the packet is not fragmented
 	testFragmentCase(t, 512, 16, 512, 0)

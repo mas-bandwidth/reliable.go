@@ -171,6 +171,76 @@ func TestPacketHeader(t *testing.T) {
 	checkHeader(200, 100, 0xFFFFFFFF, 1+2+1)
 }
 
+func TestFragmentHeader(t *testing.T) {
+	const (
+		sequence     = uint16(1000)
+		ack          = uint16(999)
+		ackBits      = uint32(0xFFFFFFFF)
+		fragmentSize = 10
+		maxFragments = 4
+	)
+
+	writeFragmentHeader := func(fragmentID, numFragments int, body []byte) []byte {
+		t.Helper()
+
+		fragmentData := []byte{1, byte(sequence & 0xFF), byte(sequence >> 8), byte(fragmentID), byte(numFragments - 1)}
+		fragmentData = append(fragmentData, body...)
+		return fragmentData
+	}
+
+	// fragment 0 also carries the packet header for the fragmented packet.
+
+	var packetHeader [MaxPacketHeaderBytes]byte
+	packetHeaderBytes := writePacketHeader(packetHeader[:], sequence, ack, ackBits)
+
+	payload0 := []byte("0123456789")
+	fragment0 := writeFragmentHeader(0, 2, append(packetHeader[:packetHeaderBytes:packetHeaderBytes], payload0...))
+
+	fragmentID, numFragments, readSequence, readAck, readAckBits, headerBytes := readFragmentHeader("test_fragment_header", fragment0, maxFragments, fragmentSize)
+
+	if fragmentID != 0 {
+		t.Fatalf("expected fragment id 0, got %d", fragmentID)
+	}
+	if numFragments != 2 {
+		t.Fatalf("expected 2 fragments, got %d", numFragments)
+	}
+	if readSequence != sequence {
+		t.Fatalf("expected sequence %d, got %d", sequence, readSequence)
+	}
+	if readAck != ack {
+		t.Fatalf("expected ack %d, got %d", ack, readAck)
+	}
+	if readAckBits != ackBits {
+		t.Fatalf("expected ack bits %#x, got %#x", ackBits, readAckBits)
+	}
+	if headerBytes != FragmentHeaderBytes {
+		t.Fatalf("expected %d header bytes, got %d", FragmentHeaderBytes, headerBytes)
+	}
+
+	// the last fragment carries only its own header before the payload.
+
+	payload1 := []byte("abcd")
+	fragment1 := writeFragmentHeader(1, 2, payload1)
+
+	fragmentID, numFragments, readSequence, readAck, readAckBits, headerBytes = readFragmentHeader("test_fragment_header", fragment1, maxFragments, fragmentSize)
+
+	if fragmentID != 1 {
+		t.Fatalf("expected fragment id 1, got %d", fragmentID)
+	}
+	if numFragments != 2 {
+		t.Fatalf("expected 2 fragments, got %d", numFragments)
+	}
+	if readSequence != sequence {
+		t.Fatalf("expected sequence %d, got %d", sequence, readSequence)
+	}
+	if readAck != 0 || readAckBits != 0 {
+		t.Fatalf("expected zero ack and ack bits on non-initial fragment, got %d and %#x", readAck, readAckBits)
+	}
+	if headerBytes != FragmentHeaderBytes {
+		t.Fatalf("expected %d header bytes, got %d", FragmentHeaderBytes, headerBytes)
+	}
+}
+
 type testContext struct {
 	drop         bool
 	allowPackets int

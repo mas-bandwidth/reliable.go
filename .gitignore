@@ -4,3 +4,4 @@
 
 # fuzz corpus
 testdata/fuzz/
+/bin/

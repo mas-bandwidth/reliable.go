@@ -7,6 +7,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"math/rand"
 	"os"
@@ -27,9 +28,11 @@ var globalTime = 100.0
 
 var globalContext testContext
 
+var random = rand.New(rand.NewSource(1))
+
 func (ctx *testContext) transmitPacket(id uint64, sequence uint16, packetData []byte) {
 
-	if rand.Intn(101) < 5 {
+	if random.Intn(101) < 5 {
 		return
 	}
 
@@ -52,6 +55,10 @@ func generatePacketData(sequence uint16, packetData []byte) []byte {
 
 func checkPacketData(packetData []byte) {
 	packetBytes := len(packetData)
+	if packetBytes < 2 {
+		fmt.Printf("check failed: packet has unexpected size %d\n", packetBytes)
+		os.Exit(1)
+	}
 	sequence := uint16(packetData[0]) | uint16(packetData[1])<<8
 	if packetBytes != (int(sequence)*1023)%(maxPacketBytes-2)+2 {
 		fmt.Printf("check failed: packet %d has unexpected size %d\n", sequence, packetBytes)
@@ -126,17 +133,19 @@ func soakIteration(time float64) {
 
 func main() {
 	numIterations := -1
-	quiet := false
+	quiet := flag.Bool("quiet", false, "disable debug logging")
+	seed := flag.Int64("seed", 1, "random seed for packet loss")
+	flag.Parse()
 
-	for _, arg := range os.Args[1:] {
-		if arg == "--quiet" {
-			quiet = true
-		} else if n, err := strconv.Atoi(arg); err == nil {
+	for _, arg := range flag.Args() {
+		if n, err := strconv.Atoi(arg); err == nil {
 			numIterations = n
 		}
 	}
 
-	soakInitialize(quiet)
+	random = rand.New(rand.NewSource(*seed))
+	fmt.Printf("seed=%d\n", *seed)
+	soakInitialize(*quiet)
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)

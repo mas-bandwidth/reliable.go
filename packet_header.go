@@ -170,14 +170,14 @@ func readPacketHeader(name string, packetData []byte) (sequence uint16, ack uint
 // bytes read, or -1 in headerBytes if the fragment is invalid. Fragment 0 also
 // carries the packet header for the fragmented packet, so ack and ackBits are
 // only filled in for fragment 0.
-func readFragmentHeader(name string, packetData []byte, maxFragments int, fragmentSize int) (fragmentID int, numFragments int, fragmentBytes int, sequence uint16, ack uint16, ackBits uint32, headerBytes int) {
+func readFragmentHeader(name string, packetData []byte, maxFragments int, fragmentSize int) (fragmentID int, numFragments int, sequence uint16, ack uint16, ackBits uint32, headerBytes int) {
 	packetBytes := len(packetData)
 
 	if packetBytes < FragmentHeaderBytes {
 		if debugLogging() {
 			logPrintf(LogLevelDebug, "[%s] packet is too small to read fragment header\n", name)
 		}
-		return 0, 0, 0, 0, 0, 0, -1
+		return 0, 0, 0, 0, 0, -1
 	}
 
 	p := 0
@@ -188,7 +188,7 @@ func readFragmentHeader(name string, packetData []byte, maxFragments int, fragme
 		if debugLogging() {
 			logPrintf(LogLevelDebug, "[%s] prefix byte is not a fragment\n", name)
 		}
-		return 0, 0, 0, 0, 0, 0, -1
+		return 0, 0, 0, 0, 0, -1
 	}
 
 	sequence = uint16(packetData[p]) | uint16(packetData[p+1])<<8
@@ -202,17 +202,17 @@ func readFragmentHeader(name string, packetData []byte, maxFragments int, fragme
 		if debugLogging() {
 			logPrintf(LogLevelDebug, "[%s] num fragments %d outside of range of max fragments %d\n", name, numFragments, maxFragments)
 		}
-		return 0, 0, 0, 0, 0, 0, -1
+		return 0, 0, 0, 0, 0, -1
 	}
 
 	if fragmentID >= numFragments {
 		if debugLogging() {
 			logPrintf(LogLevelDebug, "[%s] fragment id %d outside of range of num fragments %d\n", name, fragmentID, numFragments)
 		}
-		return 0, 0, 0, 0, 0, 0, -1
+		return 0, 0, 0, 0, 0, -1
 	}
 
-	fragmentBytes = packetBytes - FragmentHeaderBytes
+	fragmentBytes := packetBytes - FragmentHeaderBytes
 
 	var packetSequence uint16
 	var packetAck uint16
@@ -226,14 +226,14 @@ func readFragmentHeader(name string, packetData []byte, maxFragments int, fragme
 			if debugLogging() {
 				logPrintf(LogLevelDebug, "[%s] bad packet header in fragment\n", name)
 			}
-			return 0, 0, 0, 0, 0, 0, -1
+			return 0, 0, 0, 0, 0, -1
 		}
 
 		if packetSequence != sequence {
 			if debugLogging() {
 				logPrintf(LogLevelDebug, "[%s] bad packet sequence in fragment. expected %d, got %d\n", name, sequence, packetSequence)
 			}
-			return 0, 0, 0, 0, 0, 0, -1
+			return 0, 0, 0, 0, 0, -1
 		}
 
 		// the packet header is re-encoded canonically during reassembly, so a non-canonical
@@ -245,7 +245,7 @@ func readFragmentHeader(name string, packetData []byte, maxFragments int, fragme
 			if debugLogging() {
 				logPrintf(LogLevelDebug, "[%s] non-canonical packet header in fragment\n", name)
 			}
-			return 0, 0, 0, 0, 0, 0, -1
+			return 0, 0, 0, 0, 0, -1
 		}
 
 		fragmentBytes = packetBytes - packetHeaderBytes - FragmentHeaderBytes
@@ -258,15 +258,15 @@ func readFragmentHeader(name string, packetData []byte, maxFragments int, fragme
 		if debugLogging() {
 			logPrintf(LogLevelDebug, "[%s] fragment bytes %d > fragment size %d\n", name, fragmentBytes, fragmentSize)
 		}
-		return 0, 0, 0, 0, 0, 0, -1
+		return 0, 0, 0, 0, 0, -1
 	}
 
 	if fragmentID != numFragments-1 && fragmentBytes != fragmentSize {
 		if debugLogging() {
 			logPrintf(LogLevelDebug, "[%s] fragment %d is %d bytes, which is not the expected fragment size %d\n", name, fragmentID, fragmentBytes, fragmentSize)
 		}
-		return 0, 0, 0, 0, 0, 0, -1
+		return 0, 0, 0, 0, 0, -1
 	}
 
-	return fragmentID, numFragments, fragmentBytes, sequence, ack, ackBits, p
+	return fragmentID, numFragments, sequence, ack, ackBits, p
 }

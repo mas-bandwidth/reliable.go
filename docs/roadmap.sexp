@@ -4,12 +4,10 @@
 ; :tested-revision is the main commit whose CI passed with that evidence.
 (:schema 1
  :root "goal"
- :page (:title "reliable.go roadmap"
-        :roadmaps ("acks" "packets" "stats" "compat" "quality"))
+ :page (:roadmaps ("acks" "packets" "stats" "compat" "quality"))
  :nodes
  ((:id "goal" :type :work-set :children ("acks" "packets" "stats" "compat" "quality"))
   (:id "acks" :type :roadmap :title "Acks"
-   :text "Knowing which of the packets you sent were received by the other side."
    :rows (("acks" "acks for packets received")
           ("acks-loss" "acks stay correct under packet loss")
           ("ack-bits" "32 acks redundantly in every packet header")
@@ -31,7 +29,6 @@
   (:id "acks/refuse-ack" :type :task :title "the receiver can decline to ack a packet" :state :unknown
    :note "ProcessPacketFunction returning false skips the ack (README), but no test returns false; a test asserting the packet is not acked makes this done.")
   (:id "packets" :type :roadmap :title "Packets"
-   :text "Sending and receiving packets over your own UDP socket, including packets larger than the MTU."
    :rows (("packets" "send and receive packets")
           ("fragmentation" "fragmentation and reassembly of large packets")
           ("fragment-cleanup" "incomplete fragmented packets are cleaned up")
@@ -63,7 +60,6 @@
   (:id "packets/reset" :type :task :title "reset an endpoint to its initial state" :state :done :evidence ("reliable_test.go: TestEndpointReset") :tested-revision "23e05fb5e411777a034bf695e081dc5eb001a60e")
   (:id "packets/malformed" :type :task :title "malformed packets refused, fuzzed" :state :done :evidence ("fuzz_test.go: FuzzReceivePacket" ".github/workflows/ci.yml: test job, Fuzz step") :tested-revision "23e05fb5e411777a034bf695e081dc5eb001a60e")
   (:id "stats" :type :roadmap :title "Network stats"
-   :text "Estimates of round trip time, jitter, packet loss and bandwidth, updated each frame."
    :rows (("counters" "counters for sent, received, acked, stale and duplicate packets")
           ("rtt" "RTT estimates (current, min, max, average)")
           ("jitter" "jitter estimates")
@@ -85,7 +81,6 @@
   (:id "stats/bandwidth" :type :task :title "sent, received and acked bandwidth" :state :unknown
    :note "Bandwidth exists but no test asserts its values.")
   (:id "compat" :type :roadmap :title "Compatibility"
-   :text "Wire compatibility with the C reference library, mas-bandwidth/reliable, which is normative."
    :rows (("wire" "wire format byte-identical to C (golden transcript)")
           ("golden-regen" "the golden transcript is rebuilt from C on every run")
           ("standard" "wire standard (STANDARD.md) kept in sync with upstream")
@@ -101,7 +96,6 @@
   (:id "compat/c-latest" :type :task :title "verified against the latest C release (1.4.5)" :state :todo
    :note "interop/regenerate.sh pins C reliable 1.4.4 (d4b6fe0); C released 1.4.5 on 2026-09-14 (reassembled packets never carry stale heap bytes; endpoint names cannot be over-read). Bump the pin, regenerate, and port what 1.4.5 implies.")
   (:id "quality" :type :roadmap :title "Quality"
-   :text "How the library is checked on every change."
    :rows (("platforms" "Linux, macOS and Windows, Go 1.22 and stable")
           ("race" "race detector on every change")
           ("soak" "soak test")

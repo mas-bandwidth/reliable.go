@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,10 +21,39 @@ import (
 // sync, and regenerate the golden whenever the scenario changes.
 
 const wireMaxPacketBytes = 4096
-const wireNumIterations = 300
 
-func wireGeneratePacketData(sequence uint16, packetData []byte) []byte {
-	packetBytes := (int(sequence)*1023)%(wireMaxPacketBytes-2) + 2
+// The scenario primes both endpoints so that their sequence numbers are close
+// to the 65535 -> 0 wrap before the recorded frames begin. This exercises the
+// wrap without making the committed transcript 65536 frames long.
+const wirePrimeSends = 65520
+const wireNumIterations = 600
+
+// The sender transmits every frame and the receiver every third frame, so the
+// ack sequence delta grows and crosses the 8 bit / 16 bit encoding boundary.
+const wireSenderSendInterval = 1
+const wireReceiverSendInterval = 3
+
+// Loss is infrequent enough that runs of eight received packets occur, which
+// lets ack-bits bytes be elided entirely, while the gaps still produce a wide
+// variety of ack-bits values.
+const wireLossInterval = 17
+const wireDuplicateInterval = 11
+
+func wireSenderPacketBytes(frame int) int {
+	if frame%13 == 0 {
+		return 1025 + (frame*197)%3000
+	}
+	return 2 + (frame*37)%499
+}
+
+func wireReceiverPacketBytes(sendIndex int) int {
+	if sendIndex%7 == 0 {
+		return 1025 + (sendIndex*331)%3000
+	}
+	return 2 + (sendIndex*53)%499
+}
+
+func wireGeneratePacketData(sequence uint16, packetBytes int, packetData []byte) []byte {
 	packetData[0] = byte(sequence & 0xFF)
 	packetData[1] = byte((sequence >> 8) & 0xFF)
 	for i := 2; i < packetBytes; i++ {
@@ -37,16 +67,21 @@ func generateTranscript() string {
 
 	var sender, receiver *reliable.Endpoint
 
+	recording := false
 	transmitCount := 0
 
 	transmit := func(id uint64, sequence uint16, packetData []byte) {
+		if !recording {
+			return
+		}
+
 		transmitCount++
 
 		fmt.Fprintf(&b, "T %d %d %s\n", id, sequence, hex.EncodeToString(packetData))
 
 		// deterministic packet loss
 
-		if transmitCount%5 == 0 {
+		if transmitCount%wireLossInterval == 0 {
 			return
 		}
 
@@ -59,7 +94,7 @@ func generateTranscript() string {
 
 		// deterministic duplication
 
-		if transmitCount%11 == 0 {
+		if transmitCount%wireDuplicateInterval == 0 {
 			destination.ReceivePacket(packetData)
 		}
 	}
@@ -106,12 +141,33 @@ func generateTranscript() string {
 
 	packetData := make([]byte, wireMaxPacketBytes)
 
-	for range wireNumIterations {
-		packet := wireGeneratePacketData(sender.NextPacketSequence(), packetData)
+	// Advance both sequence numbers close to the wrap without recording the
+	// priming traffic. The priming packets are never delivered, but they still
+	// populate the sent packet buffers exactly as the C scenario does.
+	for i := 0; i < wirePrimeSends; i++ {
+		packet := wireGeneratePacketData(sender.NextPacketSequence(), 4, packetData)
 		sender.SendPacket(packet)
-
-		packet = wireGeneratePacketData(receiver.NextPacketSequence(), packetData)
+	}
+	for i := 0; i < wirePrimeSends; i++ {
+		packet := wireGeneratePacketData(receiver.NextPacketSequence(), 4, packetData)
 		receiver.SendPacket(packet)
+	}
+
+	recording = true
+
+	receiverSendIndex := 0
+
+	for frame := 0; frame < wireNumIterations; frame++ {
+		if frame%wireSenderSendInterval == 0 {
+			packet := wireGeneratePacketData(sender.NextPacketSequence(), wireSenderPacketBytes(frame), packetData)
+			sender.SendPacket(packet)
+		}
+
+		if frame%wireReceiverSendInterval == 0 {
+			packet := wireGeneratePacketData(receiver.NextPacketSequence(), wireReceiverPacketBytes(receiverSendIndex), packetData)
+			receiver.SendPacket(packet)
+			receiverSendIndex++
+		}
 
 		sender.Update(time)
 		receiver.Update(time)
@@ -175,4 +231,157 @@ func TestWireCompatibility(t *testing.T) {
 		}
 	}
 	t.Fatalf("wire transcript line count differs from the C library: c %d lines, go %d lines", len(wantLines), len(gotLines))
+}
+
+type wireHeaderCoverage struct {
+	regularPackets        int
+	fragmentDatagrams     int
+	multiFragmentPackets  int
+	prefixes              map[byte]int
+	headersWithElidedBits int
+	eightBitAcks          int
+	sixteenBitAcks        int
+}
+
+func wireRecordHeader(coverage *wireHeaderCoverage, header []byte) {
+	if len(header) < 3 {
+		return
+	}
+
+	prefix := header[0]
+	coverage.prefixes[prefix]++
+
+	if prefix&(1<<5) != 0 {
+		coverage.eightBitAcks++
+	} else {
+		coverage.sixteenBitAcks++
+	}
+
+	// Bits 1, 2, 3 and 4 mark the four optional ack-bits bytes. A header with
+	// any of them clear carries at least one elided ack-bits byte.
+	elided := false
+	for i := 1; i <= 4; i++ {
+		if prefix&(1<<i) == 0 {
+			elided = true
+		}
+	}
+	if elided {
+		coverage.headersWithElidedBits++
+	}
+}
+
+// TestWireHeaderCoverageCountsEachOptionalAckBitsByte checks that the header
+// coverage helper treats every one of the four optional ack-bits bytes as
+// present when its prefix bit is set and as elided when its prefix bit is
+// clear, including the low ack-bits byte selected by prefix bit 1.
+func TestWireHeaderCoverageCountsEachOptionalAckBitsByte(t *testing.T) {
+	allBitsSet := byte(1<<1 | 1<<2 | 1<<3 | 1<<4 | 1<<5)
+
+	for bit := 1; bit <= 4; bit++ {
+		coverage := wireHeaderCoverage{prefixes: make(map[byte]int)}
+		wireRecordHeader(&coverage, []byte{allBitsSet &^ byte(1<<bit), 0, 0, 0, 0})
+		if coverage.headersWithElidedBits != 1 {
+			t.Errorf("clearing prefix bit %d: expected the header to count as elided, got %d", bit, coverage.headersWithElidedBits)
+		}
+	}
+
+	coverage := wireHeaderCoverage{prefixes: make(map[byte]int)}
+	wireRecordHeader(&coverage, []byte{allBitsSet, 0, 0, 0, 0})
+	if coverage.headersWithElidedBits != 0 {
+		t.Errorf("all ack-bits bytes present: expected no elided headers, got %d", coverage.headersWithElidedBits)
+	}
+}
+
+// TestWireTranscriptScenarioCoverage checks that the golden transcript actually
+// exercises the header shapes and sequence range it claims to: mostly regular
+// packets alongside multi-fragment packets, elided ack-bits bytes, both eight
+// and sixteen bit ack deltas, and sequence numbers crossing 65535 -> 0.
+func TestWireTranscriptScenarioCoverage(t *testing.T) {
+	file, err := os.Open("testdata/c_transcript.txt.gz")
+	if err != nil {
+		t.Fatalf("could not open golden transcript (run interop/regenerate.sh): %v", err)
+	}
+	defer file.Close()
+
+	reader, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatalf("could not read golden transcript: %v", err)
+	}
+	defer reader.Close()
+
+	wantBytes, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("could not read golden transcript: %v", err)
+	}
+
+	coverage := wireHeaderCoverage{prefixes: make(map[byte]int)}
+	lastSequence := make(map[int]int)
+	wrapped := make(map[int]bool)
+
+	for _, line := range strings.Split(string(wantBytes), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 || fields[0] != "T" {
+			continue
+		}
+
+		id, err := strconv.Atoi(fields[1])
+		if err != nil {
+			t.Fatalf("bad transcript id %q: %v", fields[1], err)
+		}
+		sequence, err := strconv.Atoi(fields[2])
+		if err != nil {
+			t.Fatalf("bad transcript sequence %q: %v", fields[2], err)
+		}
+		packetData, err := hex.DecodeString(fields[3])
+		if err != nil {
+			t.Fatalf("bad transcript packet %q: %v", fields[3], err)
+		}
+		if len(packetData) < 1 {
+			t.Fatalf("empty transcript packet on line %q", line)
+		}
+
+		if previous, ok := lastSequence[id]; ok && previous > 65000 && sequence < 1000 {
+			wrapped[id] = true
+		}
+		lastSequence[id] = sequence
+
+		if packetData[0]&1 == 0 {
+			coverage.regularPackets++
+			wireRecordHeader(&coverage, packetData)
+			continue
+		}
+
+		coverage.fragmentDatagrams++
+		if len(packetData) >= 5 && packetData[3] == 0 {
+			if int(packetData[4])+1 > 1 {
+				coverage.multiFragmentPackets++
+			}
+			wireRecordHeader(&coverage, packetData[5:])
+		}
+	}
+
+	if coverage.regularPackets <= coverage.fragmentDatagrams {
+		t.Errorf("expected mostly regular packets, got %d regular and %d fragment datagrams", coverage.regularPackets, coverage.fragmentDatagrams)
+	}
+	if coverage.fragmentDatagrams == 0 {
+		t.Error("expected fragmented packets in the transcript")
+	}
+	if coverage.multiFragmentPackets == 0 {
+		t.Error("expected at least one multi-fragment packet in the transcript")
+	}
+	if len(coverage.prefixes) < 4 {
+		t.Errorf("expected at least 4 distinct packet header prefixes, got %d: %v", len(coverage.prefixes), coverage.prefixes)
+	}
+	if coverage.headersWithElidedBits == 0 {
+		t.Error("expected at least one header with an elided ack-bits byte")
+	}
+	if coverage.eightBitAcks == 0 {
+		t.Error("expected at least one 8 bit ack delta")
+	}
+	if coverage.sixteenBitAcks == 0 {
+		t.Error("expected at least one 16 bit ack delta")
+	}
+	if !wrapped[0] || !wrapped[1] {
+		t.Errorf("expected both endpoints to cross 65535 -> 0, got %v", wrapped)
+	}
 }
